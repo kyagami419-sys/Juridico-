@@ -1,99 +1,136 @@
-# Bot Jurídico para Discord
+# Bot Jurídico Discord | versão configurável
 
-## O que o bot faz
+Esta versão permite configurar o bot diretamente pelo Discord, sem precisar copiar IDs manualmente para o `config.json`.
 
-### Painel de SET
-Cargos disponíveis:
-- Estagiário
-- Advogado
-- Promotor
-- Juiz
-- Oficial de Justiça
+## Comando principal
 
-O usuário preenche Nome RP e ID. O pedido vai para um canal de análise com botões **Aprovar** e **Negar**. Ao aprovar, o cargo é entregue automaticamente.
+Use:
 
-### Painel de Ticket
-Botões:
-- Suporte
-- Reclamações
-- Denúncia
+```text
+/configuracoes
+```
 
-Ao abrir, o bot cria um canal privado.
+Na primeira configuração, enquanto nenhum gestor estiver definido, administradores do servidor conseguem abrir o painel. Depois que o dono do servidor definir um gestor, somente o gestor escolhido e o dono do servidor terão acesso ao painel de configurações.
 
-Dentro do ticket aparecem:
-- **Intimar**: seleciona um usuário, abre um formulário para escrever a intimação e envia por DM.
-- **Citar**: seleciona um usuário e define se ele entra como Testemunha, Procurador ou Autor do Fato. O usuário é adicionado ao canal e recebe aviso por DM.
-- **Audiência**: abre um formulário livre para escrever data, horário, local e observações. O aviso é publicado no ticket e enviado por DM aos participantes adicionados individualmente.
-- **Finalizar**: gera transcript HTML, envia no canal de logs e apaga o ticket após 5 segundos.
+## O que pode ser configurado pelo painel
+
+### Sistema de SET
+
+- Canal em que os pedidos de SET aguardam aprovação
+- Cargo Sistema, que pode aprovar ou negar os pedidos
+- Cargo OAB
+- Cargo Estagiário
+- Cargo Advogado
+- Cargo Promotor
+- Cargo Juiz
+- Cargo Oficial de Justiça
+- Imagem grande do painel de SET por URL
+
+Quando um SET é aprovado, o usuário recebe:
+
+1. O cargo OAB, se estiver configurado
+2. O cargo específico solicitado
+
+### Sistema de Tickets
+
+- Categoria onde os tickets serão criados
+- Canal que receberá os transcripts
+- Cargo da equipe que poderá acessar e usar as ações dos tickets
+- Imagem do painel de tickets por URL
+
+Se nenhum cargo específico de equipe de tickets for configurado, o bot usa o Cargo Sistema.
+
+## Ações dentro do ticket
+
+- Intimar: seleciona uma pessoa, abre um campo para escrever a intimação e envia por DM
+- Citar: adiciona a pessoa ao canal e permite definir Testemunha, Procurador ou Autor do Fato
+- Audiência: permite escrever livremente data, horário, local e observações
+- Finalizar: gera transcript HTML, envia no canal configurado e encerra o ticket
+
+## Publicar os painéis
+
+Dentro de `/configuracoes`, existem os botões:
+
+- Publicar painel SET aqui
+- Publicar painel Ticket aqui
+
+Assim você pode ir até o canal desejado, usar `/configuracoes` e publicar o painel diretamente nele.
+
+Os comandos antigos continuam disponíveis:
+
+```text
+/painel_set
+/painel_ticket
+/bot_status
+```
+
+## Imagem do painel
+
+O botão de imagem pede uma URL direta. Você pode enviar uma imagem em um canal do Discord, abrir a imagem e copiar o link. Cole esse link no formulário do painel.
+
+Para remover a imagem, abra a opção novamente e envie o campo vazio.
+
+## Backup da configuração
+
+No painel `/configuracoes` existe o botão **Exportar config**. Ele envia o `config.json` atual de forma privada para você salvar como backup.
 
 ## Instalação
 
-1. Instale Python 3.10 ou superior.
-2. Rode:
+Instale as dependências:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-3. No Discord Developer Portal, ative no bot:
-- SERVER MEMBERS INTENT
-- MESSAGE CONTENT INTENT
+No Discord Developer Portal, em **Bot > Privileged Gateway Intents**, ative:
 
-4. Copie `.env.example` para `.env` e coloque o token:
+- Server Members Intent
+- Message Content Intent
+
+O Presence Intent não é necessário.
+
+## Token
+
+Na Discloud, prefira configurar a variável:
+
+```text
+DISCORD_TOKEN=SEU_TOKEN
+```
+
+Nunca publique o token no GitHub.
+
+Se usar `.env`, ele deve conter:
 
 ```env
-DISCORD_TOKEN=SEU_TOKEN_AQUI
+DISCORD_TOKEN=SEU_TOKEN
 ```
 
-5. Ative o Modo Desenvolvedor do Discord e copie os IDs necessários.
+Adicione `.env` ao `.gitignore`.
 
-6. Preencha `config.json`:
-- `guild_id`: ID do servidor
-- `staff_role_ids`: IDs dos cargos que podem intimar, citar, marcar audiência e finalizar
-- `set_review_channel_id`: canal onde chegam os pedidos de SET
-- `ticket_category_id`: categoria onde serão criados os tickets
-- `ticket_log_channel_id`: canal de transcript
-- `set_roles`: IDs dos cargos que serão entregues
+## Permissões do bot
 
-7. Inicie:
+O bot precisa de permissões para:
 
-```bash
-python bot.py
-```
-
-## Criar os painéis
-
-No canal de SET, use:
-
-```text
-/painel_set
-```
-
-No canal de tickets, use:
-
-```text
-/painel_ticket
-```
-
-Para verificar a configuração:
-
-```text
-/bot_status
-```
-
-## Permissões importantes
-
-O bot deve poder:
 - Gerenciar canais
 - Gerenciar cargos
 - Ver canais
 - Enviar mensagens
-- Ler histórico
+- Ler histórico de mensagens
 - Anexar arquivos
+- Incorporar links
 - Usar comandos de aplicativo
 
-O cargo do bot precisa ficar acima dos cargos Estagiário, Advogado, Promotor, Juiz e Oficial de Justiça.
+O cargo do bot precisa ficar acima dos cargos que ele entregará aos usuários.
 
-## Hospedagem 24 horas
+## Arquivos
 
-O bot precisa ficar hospedado em VPS, hospedagem de bot ou serviço compatível com Python para funcionar 24 horas por dia.
+```text
+bot.py
+config.json
+requirements.txt
+.env.example
+README.md
+discloud.config
+```
+
+O `config.json` começa vazio e é preenchido automaticamente pelo painel de configurações.
