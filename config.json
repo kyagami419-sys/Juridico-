@@ -1,0 +1,14 @@
+{
+  "guild_id": 0,
+  "staff_role_ids": [0],
+  "set_review_channel_id": 0,
+  "ticket_category_id": 0,
+  "ticket_log_channel_id": 0,
+  "set_roles": {
+    "estagiario": 0,
+    "advogado": 0,
+    "promotor": 0,
+    "juiz": 0,
+    "oficial_justica": 0
+  }
+}
