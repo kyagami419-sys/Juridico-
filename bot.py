@@ -15,8 +15,52 @@ load_dotenv()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
-with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-    CONFIG = json.load(f)
+DEFAULT_CONFIG = {
+    "guild_id": 0,
+    "manager_user_id": 0,
+    "system_role_id": 0,
+    "oab_role_id": 0,
+    "set_review_channel_id": 0,
+    "ticket_category_id": 0,
+    "ticket_log_channel_id": 0,
+    "ticket_staff_role_id": 0,
+    "set_panel_image_url": "",
+    "ticket_panel_image_url": "",
+    "set_roles": {
+        "estagiario": 0,
+        "advogado": 0,
+        "promotor": 0,
+        "juiz": 0,
+        "oficial_justica": 0
+    }
+}
+
+
+def _merge_defaults(data, defaults):
+    result = dict(defaults)
+    for k, v in data.items():
+        if isinstance(v, dict) and isinstance(defaults.get(k), dict):
+            result[k] = _merge_defaults(v, defaults[k])
+        else:
+            result[k] = v
+    return result
+
+
+def load_config():
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        data = {}
+    return _merge_defaults(data, DEFAULT_CONFIG)
+
+
+def save_config():
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(CONFIG, f, ensure_ascii=False, indent=2)
+
+
+CONFIG = load_config()
 
 
 def as_int(v, default=0):
@@ -26,16 +70,49 @@ def as_int(v, default=0):
         return default
 
 
-def is_staff(member: discord.Member) -> bool:
+def has_role(member: discord.Member, role_id: int) -> bool:
+    return bool(role_id) and any(r.id == role_id for r in member.roles)
+
+
+def is_set_staff(member: discord.Member) -> bool:
     if member.guild_permissions.administrator:
         return True
-    staff_ids = {as_int(x) for x in CONFIG.get("staff_role_ids", [])}
-    return any(r.id in staff_ids for r in member.roles)
+    return has_role(member, as_int(CONFIG.get("system_role_id")))
 
 
-async def require_staff(interaction: discord.Interaction) -> bool:
-    if not isinstance(interaction.user, discord.Member) or not is_staff(interaction.user):
-        await interaction.response.send_message("❌ Você não tem permissão para usar esta função.", ephemeral=True)
+def is_ticket_staff(member: discord.Member) -> bool:
+    if member.guild_permissions.administrator:
+        return True
+    role_id = as_int(CONFIG.get("ticket_staff_role_id")) or as_int(CONFIG.get("system_role_id"))
+    return has_role(member, role_id)
+
+
+def can_manage_config(member: discord.Member) -> bool:
+    if member.guild.owner_id == member.id:
+        return True
+    manager_id = as_int(CONFIG.get("manager_user_id"))
+    if manager_id:
+        return member.id == manager_id
+    return member.guild_permissions.administrator
+
+
+async def require_set_staff(interaction: discord.Interaction) -> bool:
+    if not isinstance(interaction.user, discord.Member) or not is_set_staff(interaction.user):
+        await interaction.response.send_message("❌ Você não tem permissão para aprovar ou negar SET.", ephemeral=True)
+        return False
+    return True
+
+
+async def require_ticket_staff(interaction: discord.Interaction) -> bool:
+    if not isinstance(interaction.user, discord.Member) or not is_ticket_staff(interaction.user):
+        await interaction.response.send_message("❌ Você não tem permissão para usar as ações do ticket.", ephemeral=True)
+        return False
+    return True
+
+
+async def require_config_manager(interaction: discord.Interaction) -> bool:
+    if not isinstance(interaction.user, discord.Member) or not can_manage_config(interaction.user):
+        await interaction.response.send_message("❌ Este painel de configurações é restrito ao gestor do bot.", ephemeral=True)
         return False
     return True
 
@@ -173,7 +250,7 @@ class SetApprovalView(discord.ui.View):
 
     @discord.ui.button(label="Aprovar", emoji="✅", style=discord.ButtonStyle.success, custom_id="set:approve")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await require_staff(interaction):
+        if not await require_set_staff(interaction):
             return
         if not interaction.message or not interaction.message.embeds:
             return await interaction.response.send_message("❌ Solicitação inválida.", ephemeral=True)
@@ -184,10 +261,17 @@ class SetApprovalView(discord.ui.View):
         if not member or not role:
             return await interaction.response.send_message("❌ Usuário ou cargo não encontrado.", ephemeral=True)
 
+        roles_to_add = [role]
+        oab_id = as_int(CONFIG.get("oab_role_id"))
+        if oab_id:
+            oab_role = interaction.guild.get_role(oab_id)
+            if oab_role and oab_role not in roles_to_add:
+                roles_to_add.append(oab_role)
+
         try:
-            await member.add_roles(role, reason=f"SET aprovado por {interaction.user}")
+            await member.add_roles(*roles_to_add, reason=f"SET aprovado por {interaction.user}")
         except discord.Forbidden:
-            return await interaction.response.send_message("❌ O cargo do bot precisa ficar acima do cargo que será entregue.", ephemeral=True)
+            return await interaction.response.send_message("❌ O cargo do bot precisa ficar acima dos cargos que serão entregues.", ephemeral=True)
 
         embed = interaction.message.embeds[0]
         embed.title = "✅ SET aprovado"
@@ -196,14 +280,14 @@ class SetApprovalView(discord.ui.View):
         await interaction.message.edit(embed=embed, view=None)
         await safe_dm(member, embed=discord.Embed(
             title="✅ SET aprovado",
-            description=f"Seu cargo **{role.name}** foi aprovado e adicionado.",
+            description=f"Seu SET de **{role.name}** foi aprovado e os cargos configurados foram adicionados.",
             color=discord.Color.green()
         ))
         await interaction.response.send_message("✅ SET aprovado.", ephemeral=True)
 
     @discord.ui.button(label="Negar", emoji="❌", style=discord.ButtonStyle.danger, custom_id="set:deny")
     async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await require_staff(interaction):
+        if not await require_set_staff(interaction):
             return
         if not interaction.message or not interaction.message.embeds:
             return await interaction.response.send_message("❌ Solicitação inválida.", ephemeral=True)
@@ -251,11 +335,12 @@ async def create_ticket(interaction: discord.Interaction, kind: str):
         guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True,
                                                manage_messages=True, read_message_history=True, attach_files=True),
     }
-    for rid in CONFIG.get("staff_role_ids", []):
-        role = guild.get_role(as_int(rid))
-        if role:
-            overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True,
-                                                           read_message_history=True, attach_files=True)
+    ticket_staff_id = as_int(CONFIG.get("ticket_staff_role_id")) or as_int(CONFIG.get("system_role_id"))
+    ticket_staff_role = guild.get_role(ticket_staff_id) if ticket_staff_id else None
+    if ticket_staff_role:
+        overwrites[ticket_staff_role] = discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, read_message_history=True, attach_files=True
+        )
 
     label, emoji = TICKET_TYPES[kind]
     channel = await guild.create_text_channel(
@@ -481,32 +566,30 @@ class TicketActionsView(discord.ui.View):
 
     @discord.ui.button(label="Intimar", emoji="📨", style=discord.ButtonStyle.primary, custom_id="action:intimar")
     async def intimar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await require_staff(interaction):
+        if not await require_ticket_staff(interaction):
             return
         await interaction.response.send_message("Selecione a pessoa que será intimada:", view=IntimationSelectView(), ephemeral=True)
 
     @discord.ui.button(label="Citar", emoji="📜", style=discord.ButtonStyle.secondary, custom_id="action:citar")
     async def citar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await require_staff(interaction):
+        if not await require_ticket_staff(interaction):
             return
         await interaction.response.send_message("Selecione a pessoa e a participação no processo:", view=CitationSetupView(), ephemeral=True)
 
     @discord.ui.button(label="Audiência", emoji="📅", style=discord.ButtonStyle.success, custom_id="action:audiencia")
     async def audiencia(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await require_staff(interaction):
+        if not await require_ticket_staff(interaction):
             return
         await interaction.response.send_modal(HearingModal())
 
     @discord.ui.button(label="Finalizar", emoji="🔒", style=discord.ButtonStyle.danger, custom_id="action:finalizar")
     async def finalizar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await require_staff(interaction):
+        if not await require_ticket_staff(interaction):
             return
         await finalize_ticket(interaction)
 
 
-@bot.tree.command(name="painel_set", description="Envia o painel de solicitação de SET neste canal.")
-@app_commands.checks.has_permissions(administrator=True)
-async def painel_set(interaction: discord.Interaction):
+def build_set_panel_embed():
     embed = discord.Embed(
         title="⚖️ SOLICITAÇÃO DE SET",
         description=("Selecione abaixo o cargo que deseja solicitar.\n\n"
@@ -514,18 +597,320 @@ async def painel_set(interaction: discord.Interaction):
                      "Sua solicitação será enviada para análise."),
         color=discord.Color.magenta()
     )
+    image_url = str(CONFIG.get("set_panel_image_url") or "").strip()
+    if image_url:
+        embed.set_image(url=image_url)
+    return embed
+
+
+def build_ticket_panel_embed():
+    embed = discord.Embed(
+        title="🎫 CENTRAL DE ATENDIMENTO",
+        description="Escolha uma opção abaixo:\n\n🛠️ **Suporte**\n📢 **Reclamações**\n🚨 **Denúncia**",
+        color=discord.Color.blurple()
+    )
+    image_url = str(CONFIG.get("ticket_panel_image_url") or "").strip()
+    if image_url:
+        embed.set_image(url=image_url)
+    return embed
+
+
+@bot.tree.command(name="painel_set", description="Envia o painel de solicitação de SET neste canal.")
+@app_commands.checks.has_permissions(administrator=True)
+async def painel_set(interaction: discord.Interaction):
+    embed = build_set_panel_embed()
     await interaction.response.send_message(embed=embed, view=SetPanelView())
 
 
 @bot.tree.command(name="painel_ticket", description="Envia o painel de abertura de tickets neste canal.")
 @app_commands.checks.has_permissions(administrator=True)
 async def painel_ticket(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="🎫 CENTRAL DE ATENDIMENTO",
-        description="Escolha uma opção abaixo:\n\n🛠️ **Suporte**\n📢 **Reclamações**\n🚨 **Denúncia**",
-        color=discord.Color.blurple()
-    )
+    embed = build_ticket_panel_embed()
     await interaction.response.send_message(embed=embed, view=TicketPanelView())
+
+
+
+# =========================
+# PAINEL DE CONFIGURAÇÕES
+# =========================
+
+class ConfigRoleSelect(discord.ui.RoleSelect):
+    def __init__(self, key: str, label: str):
+        super().__init__(placeholder=f"Selecione: {label}", min_values=1, max_values=1)
+        self.key = key
+        self.label = label
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await require_config_manager(interaction):
+            return
+        role = self.values[0]
+        if self.key.startswith("set_roles."):
+            subkey = self.key.split(".", 1)[1]
+            CONFIG.setdefault("set_roles", {})[subkey] = role.id
+        else:
+            CONFIG[self.key] = role.id
+        save_config()
+        await interaction.response.send_message(f"✅ **{self.label}** definido como {role.mention}.", ephemeral=True)
+
+
+class ConfigRoleSelectView(discord.ui.View):
+    def __init__(self, key: str, label: str):
+        super().__init__(timeout=180)
+        self.add_item(ConfigRoleSelect(key, label))
+
+
+class ConfigTextChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, key: str, label: str):
+        super().__init__(placeholder=f"Selecione: {label}", channel_types=[discord.ChannelType.text], min_values=1, max_values=1)
+        self.key = key
+        self.label = label
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await require_config_manager(interaction):
+            return
+        channel = self.values[0]
+        CONFIG[self.key] = channel.id
+        save_config()
+        await interaction.response.send_message(f"✅ **{self.label}** definido como {channel.mention}.", ephemeral=True)
+
+
+class ConfigTextChannelSelectView(discord.ui.View):
+    def __init__(self, key: str, label: str):
+        super().__init__(timeout=180)
+        self.add_item(ConfigTextChannelSelect(key, label))
+
+
+class ConfigCategorySelect(discord.ui.ChannelSelect):
+    def __init__(self):
+        super().__init__(placeholder="Selecione a categoria dos tickets", channel_types=[discord.ChannelType.category], min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await require_config_manager(interaction):
+            return
+        category = self.values[0]
+        CONFIG["ticket_category_id"] = category.id
+        save_config()
+        await interaction.response.send_message(f"✅ Categoria dos tickets definida como **{category.name}**.", ephemeral=True)
+
+
+class ConfigCategorySelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        self.add_item(ConfigCategorySelect())
+
+
+class ConfigManagerSelect(discord.ui.UserSelect):
+    def __init__(self):
+        super().__init__(placeholder="Selecione quem poderá usar o painel de configurações", min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not interaction.guild or interaction.user.id != interaction.guild.owner_id:
+            return await interaction.response.send_message("❌ Somente o dono do servidor pode alterar o gestor do bot.", ephemeral=True)
+        user = self.values[0]
+        CONFIG["manager_user_id"] = user.id
+        CONFIG["guild_id"] = interaction.guild.id
+        save_config()
+        await interaction.response.send_message(f"✅ Gestor do bot definido como {user.mention}.\nO dono do servidor continuará com acesso de segurança.", ephemeral=True)
+
+
+class ConfigManagerSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        self.add_item(ConfigManagerSelect())
+
+
+class PanelImageModal(discord.ui.Modal):
+    def __init__(self, key: str, title_text: str):
+        super().__init__(title=title_text)
+        self.key = key
+        self.url = discord.ui.TextInput(
+            label="URL direta da imagem",
+            placeholder="https://.../imagem.png  |  deixe vazio para remover",
+            required=False,
+            max_length=1000
+        )
+        self.add_item(self.url)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not await require_config_manager(interaction):
+            return
+        value = str(self.url).strip()
+        if value and not (value.startswith("https://") or value.startswith("http://")):
+            return await interaction.response.send_message("❌ Informe um link http:// ou https:// válido.", ephemeral=True)
+        CONFIG[self.key] = value
+        save_config()
+        await interaction.response.send_message("✅ Imagem atualizada." if value else "✅ Imagem removida.", ephemeral=True)
+
+
+def config_summary_embed(guild: discord.Guild):
+    def role_text(key, nested=False):
+        rid = as_int(CONFIG.get("set_roles", {}).get(key)) if nested else as_int(CONFIG.get(key))
+        role = guild.get_role(rid) if rid else None
+        return role.mention if role else "❌ Não configurado"
+
+    def channel_text(key):
+        cid = as_int(CONFIG.get(key))
+        ch = guild.get_channel(cid) if cid else None
+        return ch.mention if isinstance(ch, discord.TextChannel) else "❌ Não configurado"
+
+    cat = guild.get_channel(as_int(CONFIG.get("ticket_category_id")))
+    manager = guild.get_member(as_int(CONFIG.get("manager_user_id")))
+
+    embed = discord.Embed(title="⚙️ CONFIGURAÇÕES DO BOT JURÍDICO", color=discord.Color.dark_magenta())
+    embed.description = "Use os botões abaixo para configurar o bot sem editar IDs manualmente."
+    embed.add_field(name="👤 Gestor", value=manager.mention if manager else "⚠️ Ainda não definido", inline=False)
+    embed.add_field(
+        name="⚖️ SET",
+        value=(
+            f"Canal de aprovação: {channel_text('set_review_channel_id')}\n"
+            f"Cargo Sistema: {role_text('system_role_id')}\n"
+            f"Cargo OAB: {role_text('oab_role_id')}\n"
+            f"Estagiário: {role_text('estagiario', True)}\n"
+            f"Advogado: {role_text('advogado', True)}\n"
+            f"Promotor: {role_text('promotor', True)}\n"
+            f"Juiz: {role_text('juiz', True)}\n"
+            f"Oficial de Justiça: {role_text('oficial_justica', True)}"
+        ), inline=False
+    )
+    ticket_staff = role_text("ticket_staff_role_id")
+    if ticket_staff == "❌ Não configurado":
+        ticket_staff = f"Usará Cargo Sistema ({role_text('system_role_id')})"
+    embed.add_field(
+        name="🎫 TICKETS",
+        value=(
+            f"Categoria: **{cat.name}**" if isinstance(cat, discord.CategoryChannel) else "Categoria: ❌ Não configurada"
+        ) + f"\nCanal de transcript: {channel_text('ticket_log_channel_id')}\nEquipe de tickets: {ticket_staff}",
+        inline=False
+    )
+    embed.add_field(
+        name="🖼️ Imagens",
+        value=(
+            f"Painel SET: {'✅ Configurada' if CONFIG.get('set_panel_image_url') else 'Não configurada'}\n"
+            f"Painel Ticket: {'✅ Configurada' if CONFIG.get('ticket_panel_image_url') else 'Não configurada'}"
+        ), inline=False
+    )
+    return embed
+
+
+class SetConfigView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+
+    async def _role(self, interaction, key, label):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message(f"Selecione o cargo para **{label}**:", view=ConfigRoleSelectView(key, label), ephemeral=True)
+
+    @discord.ui.button(label="Canal aprovar SET", emoji="📥", style=discord.ButtonStyle.primary, row=0)
+    async def review_channel(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message("Selecione o canal onde os pedidos de SET ficarão aguardando aprovação:", view=ConfigTextChannelSelectView("set_review_channel_id", "Canal de aprovação de SET"), ephemeral=True)
+
+    @discord.ui.button(label="Cargo Sistema", emoji="🛡️", style=discord.ButtonStyle.primary, row=0)
+    async def system_role(self, interaction, button): await self._role(interaction, "system_role_id", "Cargo Sistema")
+
+    @discord.ui.button(label="Cargo OAB", emoji="⚖️", style=discord.ButtonStyle.primary, row=0)
+    async def oab_role(self, interaction, button): await self._role(interaction, "oab_role_id", "Cargo OAB")
+
+    @discord.ui.button(label="Estagiário", emoji="📚", style=discord.ButtonStyle.secondary, row=1)
+    async def estagiario(self, interaction, button): await self._role(interaction, "set_roles.estagiario", "Estagiário")
+
+    @discord.ui.button(label="Advogado", emoji="💼", style=discord.ButtonStyle.secondary, row=1)
+    async def advogado(self, interaction, button): await self._role(interaction, "set_roles.advogado", "Advogado")
+
+    @discord.ui.button(label="Promotor", emoji="⚖️", style=discord.ButtonStyle.secondary, row=1)
+    async def promotor(self, interaction, button): await self._role(interaction, "set_roles.promotor", "Promotor")
+
+    @discord.ui.button(label="Juiz", emoji="👨‍⚖️", style=discord.ButtonStyle.secondary, row=2)
+    async def juiz(self, interaction, button): await self._role(interaction, "set_roles.juiz", "Juiz")
+
+    @discord.ui.button(label="Oficial de Justiça", emoji="📜", style=discord.ButtonStyle.secondary, row=2)
+    async def oficial(self, interaction, button): await self._role(interaction, "set_roles.oficial_justica", "Oficial de Justiça")
+
+    @discord.ui.button(label="Imagem painel SET", emoji="🖼️", style=discord.ButtonStyle.success, row=2)
+    async def imagem(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_modal(PanelImageModal("set_panel_image_url", "Imagem do painel de SET"))
+
+
+class TicketConfigView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+
+    @discord.ui.button(label="Categoria dos tickets", emoji="📁", style=discord.ButtonStyle.primary, row=0)
+    async def category(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message("Selecione a categoria onde os tickets serão criados:", view=ConfigCategorySelectView(), ephemeral=True)
+
+    @discord.ui.button(label="Canal transcript", emoji="🗂️", style=discord.ButtonStyle.primary, row=0)
+    async def logs(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message("Selecione o canal que receberá os transcripts:", view=ConfigTextChannelSelectView("ticket_log_channel_id", "Canal de transcript"), ephemeral=True)
+
+    @discord.ui.button(label="Equipe de tickets", emoji="👥", style=discord.ButtonStyle.primary, row=0)
+    async def staff(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message("Selecione o cargo que poderá ver e usar as ações dos tickets. Se não configurar, o bot usa o Cargo Sistema:", view=ConfigRoleSelectView("ticket_staff_role_id", "Equipe de tickets"), ephemeral=True)
+
+    @discord.ui.button(label="Imagem painel Ticket", emoji="🖼️", style=discord.ButtonStyle.success, row=1)
+    async def imagem(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_modal(PanelImageModal("ticket_panel_image_url", "Imagem do painel de Ticket"))
+
+
+class ConfigMainView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=600)
+
+    @discord.ui.button(label="Configurar SET", emoji="⚖️", style=discord.ButtonStyle.primary, row=0)
+    async def set_config(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message("⚙️ **Configuração do sistema de SET**", view=SetConfigView(), ephemeral=True)
+
+    @discord.ui.button(label="Configurar Tickets", emoji="🎫", style=discord.ButtonStyle.primary, row=0)
+    async def ticket_config(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message("⚙️ **Configuração do sistema de tickets**", view=TicketConfigView(), ephemeral=True)
+
+    @discord.ui.button(label="Ver configuração", emoji="🔎", style=discord.ButtonStyle.secondary, row=0)
+    async def summary(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message(embed=config_summary_embed(interaction.guild), ephemeral=True)
+
+    @discord.ui.button(label="Definir gestor", emoji="👤", style=discord.ButtonStyle.secondary, row=1)
+    async def manager(self, interaction, button):
+        if not interaction.guild or interaction.user.id != interaction.guild.owner_id:
+            return await interaction.response.send_message("❌ Somente o dono do servidor pode definir o gestor do bot.", ephemeral=True)
+        await interaction.response.send_message("Selecione quem terá acesso ao painel de configurações:", view=ConfigManagerSelectView(), ephemeral=True)
+
+    @discord.ui.button(label="Publicar painel SET aqui", emoji="📌", style=discord.ButtonStyle.success, row=1)
+    async def publish_set(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.channel.send(embed=build_set_panel_embed(), view=SetPanelView())
+        await interaction.response.send_message("✅ Painel de SET publicado neste canal.", ephemeral=True)
+
+    @discord.ui.button(label="Publicar painel Ticket aqui", emoji="📌", style=discord.ButtonStyle.success, row=1)
+    async def publish_ticket(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.channel.send(embed=build_ticket_panel_embed(), view=TicketPanelView())
+        await interaction.response.send_message("✅ Painel de tickets publicado neste canal.", ephemeral=True)
+
+    @discord.ui.button(label="Exportar config", emoji="💾", style=discord.ButtonStyle.secondary, row=2)
+    async def export_config(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        save_config()
+        await interaction.response.send_message("💾 Backup atual da configuração:", file=discord.File(CONFIG_PATH, filename="config.json"), ephemeral=True)
+
+
+@bot.tree.command(name="configuracoes", description="Abre o painel de configurações do Bot Jurídico.")
+async def configuracoes(interaction: discord.Interaction):
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
+        return await interaction.response.send_message("❌ Use este comando dentro do servidor.", ephemeral=True)
+    if not await require_config_manager(interaction):
+        return
+    if not as_int(CONFIG.get("guild_id")):
+        CONFIG["guild_id"] = interaction.guild.id
+        save_config()
+    await interaction.response.send_message(embed=config_summary_embed(interaction.guild), view=ConfigMainView(), ephemeral=True)
 
 
 @bot.tree.command(name="bot_status", description="Confere a configuração básica do bot.")
