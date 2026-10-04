@@ -24,6 +24,8 @@ DEFAULT_CONFIG = {
     "ticket_category_id": 0,
     "ticket_log_channel_id": 0,
     "ticket_staff_role_id": 0,
+    "ban_channel_id": 0,
+    "ban_log_channel_id": 0,
     "set_panel_image_url": "",
     "ticket_panel_image_url": "",
     "set_roles": {
@@ -783,6 +785,14 @@ def config_summary_embed(guild: discord.Guild):
         inline=False
     )
     embed.add_field(
+        name="🚨 BAN AUTOMÁTICO",
+        value=(
+            f"Canal de ban: {channel_text('ban_channel_id')}\n"
+            f"Canal de log: {channel_text('ban_log_channel_id')}"
+        ),
+        inline=False
+    )
+    embed.add_field(
         name="🖼️ Imagens",
         value=(
             f"Painel SET: {'✅ Configurada' if CONFIG.get('set_panel_image_url') else 'Não configurada'}\n"
@@ -857,6 +867,29 @@ class TicketConfigView(discord.ui.View):
         await interaction.response.send_modal(PanelImageModal("ticket_panel_image_url", "Imagem do painel de Ticket"))
 
 
+class BanConfigView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+
+    @discord.ui.button(label="Canal de ban", emoji="🚫", style=discord.ButtonStyle.danger, row=0)
+    async def ban_channel(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message(
+            "Selecione o canal onde qualquer usuário que escrever será banido automaticamente:",
+            view=ConfigTextChannelSelectView("ban_channel_id", "Canal de ban automático"),
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Canal de log do ban", emoji="🗂️", style=discord.ButtonStyle.secondary, row=0)
+    async def ban_log_channel(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message(
+            "Selecione o canal que receberá os registros dos banimentos automáticos:",
+            view=ConfigTextChannelSelectView("ban_log_channel_id", "Canal de log dos banimentos"),
+            ephemeral=True
+        )
+
+
 class ConfigMainView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=600)
@@ -870,6 +903,11 @@ class ConfigMainView(discord.ui.View):
     async def ticket_config(self, interaction, button):
         if not await require_config_manager(interaction): return
         await interaction.response.send_message("⚙️ **Configuração do sistema de tickets**", view=TicketConfigView(), ephemeral=True)
+
+    @discord.ui.button(label="Configurar Ban", emoji="🚨", style=discord.ButtonStyle.danger, row=0)
+    async def ban_config(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message("⚙️ **Configuração do banimento automático**", view=BanConfigView(), ephemeral=True)
 
     @discord.ui.button(label="Ver configuração", emoji="🔎", style=discord.ButtonStyle.secondary, row=0)
     async def summary(self, interaction, button):
@@ -939,6 +977,75 @@ async def on_tree_error(interaction: discord.Interaction, error: app_commands.Ap
         await interaction.followup.send(msg, ephemeral=True)
     else:
         await interaction.response.send_message(msg, ephemeral=True)
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    # Mantém o restante do bot intacto e atua somente no canal configurado para ban automático.
+    if message.author.bot or not message.guild:
+        return
+
+    guild_id = as_int(CONFIG.get("guild_id"))
+    if guild_id and message.guild.id != guild_id:
+        return
+
+    ban_channel_id = as_int(CONFIG.get("ban_channel_id"))
+    if not ban_channel_id or message.channel.id != ban_channel_id:
+        return
+
+    log_channel_id = as_int(CONFIG.get("ban_log_channel_id"))
+    log_channel = message.guild.get_channel(log_channel_id) if log_channel_id else None
+
+    author_name = str(message.author)
+    author_id = message.author.id
+    content = (message.content or "[sem conteúdo de texto]")[:1000]
+
+    try:
+        await message.author.ban(
+            reason=f"Mensagem enviada no canal de ban automático #{message.channel.name}"
+        )
+    except discord.Forbidden:
+        if isinstance(log_channel, discord.TextChannel):
+            embed = discord.Embed(
+                title="⚠️ Falha no banimento automático",
+                description="O bot não conseguiu banir o usuário. Verifique a permissão **Banir Membros** e a hierarquia de cargos.",
+                color=discord.Color.orange(),
+                timestamp=discord.utils.utcnow()
+            )
+            embed.add_field(name="Usuário", value=f"{author_name} (`{author_id}`)", inline=False)
+            embed.add_field(name="Canal", value=message.channel.mention, inline=False)
+            await log_channel.send(embed=embed)
+        return
+    except discord.HTTPException as error:
+        if isinstance(log_channel, discord.TextChannel):
+            embed = discord.Embed(
+                title="⚠️ Erro no banimento automático",
+                description=f"O Discord recusou a operação: `{error}`",
+                color=discord.Color.orange(),
+                timestamp=discord.utils.utcnow()
+            )
+            embed.add_field(name="Usuário", value=f"{author_name} (`{author_id}`)", inline=False)
+            embed.add_field(name="Canal", value=message.channel.mention, inline=False)
+            await log_channel.send(embed=embed)
+        return
+
+    try:
+        await message.delete()
+    except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+        pass
+
+    if isinstance(log_channel, discord.TextChannel):
+        embed = discord.Embed(
+            title="🚨 Banimento automático realizado",
+            color=discord.Color.red(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.add_field(name="Usuário banido", value=f"{author_name} (`{author_id}`)", inline=False)
+        embed.add_field(name="Canal", value=message.channel.mention, inline=True)
+        embed.add_field(name="Ação", value="Banimento automático", inline=True)
+        embed.add_field(name="Mensagem enviada", value=content, inline=False)
+        embed.set_footer(text="Bot Jurídico • Sistema de Segurança")
+        await log_channel.send(embed=embed)
 
 
 @bot.event
