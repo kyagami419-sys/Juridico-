@@ -10,10 +10,18 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
+import pymysql
 
 load_dotenv()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+
+DB_HOST = os.getenv("DB_HOST", "").strip()
+DB_PORT = int(os.getenv("DB_PORT", "3306") or 3306)
+DB_USER = os.getenv("DB_USER", "").strip()
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+DB_NAME = os.getenv("DB_NAME", "").strip()
+DB_CONFIG_ID = 1
 
 DEFAULT_CONFIG = {
     "guild_id": 0,
@@ -48,18 +56,136 @@ def _merge_defaults(data, defaults):
     return result
 
 
-def load_config():
+def _db_configured():
+    return bool(DB_HOST and DB_USER and DB_NAME)
+
+
+def _db_connect():
+    return pymysql.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        database=DB_NAME,
+        charset="utf8mb4",
+        autocommit=True,
+        connect_timeout=10,
+        cursorclass=pymysql.cursors.DictCursor,
+    )
+
+
+def _ensure_config_table():
+    if not _db_configured():
+        return
+    connection = _db_connect()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bot_config (
+                    id INT NOT NULL PRIMARY KEY,
+                    config_json LONGTEXT NOT NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                        ON UPDATE CURRENT_TIMESTAMP
+                ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+                """
+            )
+    finally:
+        connection.close()
+
+
+def _load_config_from_file():
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
+            return data if isinstance(data, dict) else {}
     except (FileNotFoundError, json.JSONDecodeError):
-        data = {}
-    return _merge_defaults(data, DEFAULT_CONFIG)
+        return {}
+
+
+def _write_local_backup(config_data):
+    # Mantém o config.json apenas como backup/exportação.
+    # A fonte principal passa a ser o MySQL.
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(config_data, f, ensure_ascii=False, indent=2)
+
+
+def _save_config_to_db(config_data):
+    if not _db_configured():
+        return False
+
+    _ensure_config_table()
+    connection = _db_connect()
+    try:
+        payload = json.dumps(config_data, ensure_ascii=False)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO bot_config (id, config_json)
+                VALUES (%s, %s)
+                ON DUPLICATE KEY UPDATE config_json = VALUES(config_json)
+                """,
+                (DB_CONFIG_ID, payload),
+            )
+        return True
+    finally:
+        connection.close()
+
+
+def load_config():
+    # 1) O MySQL é a fonte principal. Assim os commits/deploys não apagam
+    #    as configurações feitas pelo painel /configuracoes.
+    if _db_configured():
+        try:
+            _ensure_config_table()
+            connection = _db_connect()
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT config_json FROM bot_config WHERE id = %s LIMIT 1",
+                        (DB_CONFIG_ID,),
+                    )
+                    row = cursor.fetchone()
+            finally:
+                connection.close()
+
+            if row and row.get("config_json"):
+                data = json.loads(row["config_json"])
+                if isinstance(data, dict):
+                    merged = _merge_defaults(data, DEFAULT_CONFIG)
+                    _write_local_backup(merged)
+                    print("✅ Configurações carregadas do MySQL.")
+                    return merged
+        except Exception as error:
+            print(f"⚠️ Não foi possível carregar as configurações do MySQL: {error}")
+
+    # 2) Se ainda não existir configuração no banco, usa o config.json atual.
+    #    Na primeira inicialização com o banco, ele é migrado automaticamente.
+    data = _load_config_from_file()
+    merged = _merge_defaults(data, DEFAULT_CONFIG)
+
+    if _db_configured():
+        try:
+            _save_config_to_db(merged)
+            print("✅ Configuração inicial migrada para o MySQL.")
+        except Exception as error:
+            print(f"⚠️ Não foi possível migrar o config.json para o MySQL: {error}")
+
+    return merged
 
 
 def save_config():
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(CONFIG, f, ensure_ascii=False, indent=2)
+    # Mantém o arquivo local para o botão 'Exportar config'.
+    _write_local_backup(CONFIG)
+
+    # Salva de forma persistente no banco para sobreviver a commits/redeploys.
+    if _db_configured():
+        try:
+            _save_config_to_db(CONFIG)
+        except Exception as error:
+            print(f"❌ Falha ao salvar configurações no MySQL: {error}")
+    else:
+        print("⚠️ Banco de dados não configurado. Configuração salva apenas em config.json.")
 
 
 CONFIG = load_config()
