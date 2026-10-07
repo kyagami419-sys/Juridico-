@@ -353,9 +353,13 @@ class SetRequestModal(discord.ui.Modal):
 
 
 class SetRoleButton(discord.ui.Button):
-    def __init__(self, key: str, emoji: str, row: int):
-        super().__init__(label=SET_LABELS[key], emoji=emoji, style=discord.ButtonStyle.primary,
-                         custom_id=f"set:{key}", row=row)
+    def __init__(self, key: str, row: int):
+        super().__init__(
+            label=SET_LABELS[key],
+            style=discord.ButtonStyle.danger,
+            custom_id=f"set:{key}",
+            row=row
+        )
         self.key = key
 
     async def callback(self, interaction: discord.Interaction):
@@ -365,11 +369,11 @@ class SetRoleButton(discord.ui.Button):
 class SetPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        for key, emoji, row in [
-            ("estagiario", "📚", 0), ("advogado", "💼", 0), ("promotor", "⚖️", 0),
-            ("juiz", "👨‍⚖️", 1), ("oficial_justica", "📜", 1)
+        for key, row in [
+            ("estagiario", 0), ("advogado", 0), ("promotor", 0),
+            ("juiz", 1), ("oficial_justica", 1)
         ]:
-            self.add_item(SetRoleButton(key, emoji, row))
+            self.add_item(SetRoleButton(key, row))
 
 
 class SetApprovalView(discord.ui.View):
@@ -719,12 +723,16 @@ class TicketActionsView(discord.ui.View):
 
 def build_set_panel_embed():
     embed = discord.Embed(
-        title="⚖️ SOLICITAÇÃO DE SET",
-        description=("Selecione abaixo o cargo que deseja solicitar.\n\n"
-                     "📚 Estagiário\n💼 Advogado\n⚖️ Promotor\n👨‍⚖️ Juiz\n📜 Oficial de Justiça\n\n"
-                     "Sua solicitação será enviada para análise."),
-        color=discord.Color.magenta()
+        title="SOLICITAÇÃO DE SET",
+        description=(
+            "**Tribunal de Justiça**\n"
+            "Selecione abaixo o cargo que deseja solicitar.\n\n"
+            "> Sua solicitação será encaminhada para análise da equipe responsável."
+        ),
+        color=0xC1121F
     )
+    embed.set_footer(text="Tribunal de Justiça • Sistema Integrado")
+
     image_url = str(CONFIG.get("set_panel_image_url") or "").strip()
     if image_url:
         embed.set_image(url=image_url)
