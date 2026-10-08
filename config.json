@@ -9,6 +9,8 @@
   "ticket_staff_role_id": 1556391535749111828,
   "ban_channel_id": 1556451127443202268,
   "ban_log_channel_id": 1556453850595065988,
+  "welcome_channel_id": 1556073504221302859,
+  "leave_channel_id": 1556073504221302860,
   "set_panel_image_url": "https://cdn.discordapp.com/attachments/1556073507774005264/1557455045350662144/emblema_dourado_da_justica_animado.gif?backend=b2&ex=6ac8854a&is=6ac733ca&hm=8a5ca6c4878a4805c827be5b73b9fc7a7cf77faafaa4eec7b6645eef65b4b50e&",
   "ticket_panel_image_url": "https://cdn.discordapp.com/attachments/1556073507774005264/1557455045350662144/emblema_dourado_da_justica_animado.gif?backend=b2&ex=6ac8854a&is=6ac733ca&hm=8a5ca6c4878a4805c827be5b73b9fc7a7cf77faafaa4eec7b6645eef65b4b50e&",
   "set_roles": {
