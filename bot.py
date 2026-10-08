@@ -305,6 +305,7 @@ class JuridicoBot(commands.Bot):
 
     async def setup_hook(self):
         self.add_view(SetPanelView())
+        self.add_view(LegacySetPanelView())
         self.add_view(SetApprovalView())
         self.add_view(TicketPanelView())
         self.add_view(TicketActionsView())
@@ -402,7 +403,54 @@ class SetRoleButton(discord.ui.Button):
         await interaction.response.send_modal(SetRequestModal(self.key))
 
 
+SET_MENU_OPTIONS = [
+    ("estagiario", "📚", "Jurídico"),
+    ("advogado", "💼", "Jurídico"),
+    ("promotor", "⚖️", "Jurídico"),
+    ("juiz", "👨‍⚖️", "Jurídico"),
+    ("oficial_justica", "📜", "Jurídico"),
+    ("morador", "🏠", "Civil"),
+    ("policia_federal", "🛡️", "Polícias"),
+    ("policia_civil", "🚔", "Polícias"),
+    ("policia_penal", "⛓️", "Polícias"),
+    ("policia_militar", "👮", "Polícias"),
+    ("prf", "🛣️", "Polícias"),
+    ("bope", "💀", "Polícias"),
+    ("exercito", "🎖️", "Polícias"),
+]
+
+
+class SetTypeSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(
+                label=SET_LABELS[key],
+                value=key,
+                emoji=emoji,
+                description=f"SET • {grupo}"
+            )
+            for key, emoji, grupo in SET_MENU_OPTIONS
+        ]
+        super().__init__(
+            placeholder="Selecione o tipo de SET...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="set:menu_principal"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(SetRequestModal(self.values[0]))
+
+
 class SetPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(SetTypeSelect())
+
+
+class LegacySetPanelView(discord.ui.View):
+    """Mantém os painéis antigos com botões funcionando após a atualização."""
     def __init__(self):
         super().__init__(timeout=None)
         for key, emoji, row in [
@@ -766,11 +814,9 @@ class TicketActionsView(discord.ui.View):
 def build_set_panel_embed():
     embed = discord.Embed(
         title="⚖️ SOLICITAÇÃO DE SET",
-        description=("Selecione abaixo o cargo que deseja solicitar.\n\n"
-                     "📚 Estagiário\n💼 Advogado\n⚖️ Promotor\n👨‍⚖️ Juiz\n📜 Oficial de Justiça\n"
-                     "🏠 Morador\n🛡️ Polícia Federal\n🚔 Polícia Civil\n⛓️ Polícia Penal\n"
-                     "👮 Polícia Militar\n🛣️ PRF\n💀 BOPE\n🎖️ Exército\n\n"
-                     "Sua solicitação será enviada para análise."),
+        description=("Abra o menu abaixo e selecione o SET que deseja solicitar.\n\n"
+                     "Após escolher uma opção, preencha os dados solicitados.\n"
+                     "Sua solicitação será encaminhada para análise."),
         color=discord.Color.magenta()
     )
     image_url = str(CONFIG.get("set_panel_image_url") or "").strip()
@@ -789,6 +835,98 @@ def build_ticket_panel_embed():
     if image_url:
         embed.set_image(url=image_url)
     return embed
+
+
+class SendEmbedModal(discord.ui.Modal):
+    def __init__(self, target_channel: discord.TextChannel):
+        super().__init__(title="Enviar mensagem pelo bot")
+        self.target_channel = target_channel
+
+        self.titulo = discord.ui.TextInput(
+            label="Título",
+            placeholder="Opcional",
+            required=False,
+            max_length=256
+        )
+        self.mensagem = discord.ui.TextInput(
+            label="Mensagem",
+            placeholder="Escreva a mensagem que o bot deverá enviar...",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=4000
+        )
+        self.cor = discord.ui.TextInput(
+            label="Cor HEX",
+            placeholder="#FF0000 (opcional)",
+            required=False,
+            max_length=7
+        )
+        self.rodape = discord.ui.TextInput(
+            label="Rodapé",
+            placeholder="Opcional",
+            required=False,
+            max_length=2048
+        )
+
+        self.add_item(self.titulo)
+        self.add_item(self.mensagem)
+        self.add_item(self.cor)
+        self.add_item(self.rodape)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not await require_config_manager(interaction):
+            return
+
+        cor = discord.Color.dark_red()
+        cor_texto = str(self.cor).strip().lstrip("#")
+        if cor_texto:
+            try:
+                cor = discord.Color(int(cor_texto, 16))
+            except ValueError:
+                return await interaction.response.send_message(
+                    "❌ Cor inválida. Use o formato HEX, por exemplo: `#FF0000`.",
+                    ephemeral=True
+                )
+
+        titulo = str(self.titulo).strip()
+        mensagem = str(self.mensagem).strip()
+        rodape = str(self.rodape).strip()
+
+        embed = discord.Embed(
+            title=titulo or None,
+            description=mensagem,
+            color=cor
+        )
+        if rodape:
+            embed.set_footer(text=rodape)
+
+        try:
+            await self.target_channel.send(embed=embed)
+        except discord.Forbidden:
+            return await interaction.response.send_message(
+                "❌ O bot não tem permissão para enviar mensagens nesse canal.",
+                ephemeral=True
+            )
+        except discord.HTTPException as error:
+            return await interaction.response.send_message(
+                f"❌ Não foi possível enviar a mensagem: `{error}`",
+                ephemeral=True
+            )
+
+        await interaction.response.send_message(
+            f"✅ Mensagem enviada em {self.target_channel.mention}.",
+            ephemeral=True
+        )
+
+
+@bot.tree.command(name="embe", description="Envia uma mensagem em embed para um canal pelo bot.")
+@app_commands.describe(canal="Canal onde a mensagem será enviada")
+async def embe(interaction: discord.Interaction, canal: discord.TextChannel):
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
+        return await interaction.response.send_message("❌ Use este comando dentro do servidor.", ephemeral=True)
+    if not await require_config_manager(interaction):
+        return
+    await interaction.response.send_modal(SendEmbedModal(canal))
 
 
 @bot.tree.command(name="painel_set", description="Envia o painel de solicitação de SET neste canal.")
