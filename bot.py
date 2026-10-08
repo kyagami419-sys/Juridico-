@@ -34,6 +34,8 @@ DEFAULT_CONFIG = {
     "ticket_staff_role_id": 0,
     "ban_channel_id": 0,
     "ban_log_channel_id": 0,
+    "welcome_channel_id": 0,
+    "leave_channel_id": 0,
     "set_panel_image_url": "",
     "ticket_panel_image_url": "",
     "set_roles": {
@@ -1113,6 +1115,14 @@ def config_summary_embed(guild: discord.Guild):
         inline=False
     )
     embed.add_field(
+        name="👋 ENTRADA / SAÍDA",
+        value=(
+            f"Boas-vindas: {channel_text('welcome_channel_id')}\n"
+            f"Saída: {channel_text('leave_channel_id')}"
+        ),
+        inline=False
+    )
+    embed.add_field(
         name="🖼️ Imagens",
         value=(
             f"Painel SET: {'✅ Configurada' if CONFIG.get('set_panel_image_url') else 'Não configurada'}\n"
@@ -1234,6 +1244,29 @@ class BanConfigView(discord.ui.View):
         )
 
 
+class MemberLogConfigView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+
+    @discord.ui.button(label="Canal de boas-vindas", emoji="👋", style=discord.ButtonStyle.success, row=0)
+    async def welcome_channel(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message(
+            "Selecione o canal que receberá as mensagens quando alguém entrar no servidor:",
+            view=ConfigTextChannelSelectView("welcome_channel_id", "Canal de boas-vindas"),
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Canal de saída", emoji="🚪", style=discord.ButtonStyle.secondary, row=0)
+    async def leave_channel(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message(
+            "Selecione o canal que receberá as mensagens quando alguém sair do servidor:",
+            view=ConfigTextChannelSelectView("leave_channel_id", "Canal de saída"),
+            ephemeral=True
+        )
+
+
 class ConfigMainView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=600)
@@ -1252,6 +1285,11 @@ class ConfigMainView(discord.ui.View):
     async def ban_config(self, interaction, button):
         if not await require_config_manager(interaction): return
         await interaction.response.send_message("⚙️ **Configuração do banimento automático**", view=BanConfigView(), ephemeral=True)
+
+    @discord.ui.button(label="Entrada / Saída", emoji="👋", style=discord.ButtonStyle.secondary, row=2)
+    async def member_logs_config(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message("⚙️ **Configuração de boas-vindas e saída**", view=MemberLogConfigView(), ephemeral=True)
 
     @discord.ui.button(label="Ver configuração", emoji="🔎", style=discord.ButtonStyle.secondary, row=0)
     async def summary(self, interaction, button):
@@ -1321,6 +1359,68 @@ async def on_tree_error(interaction: discord.Interaction, error: app_commands.Ap
         await interaction.followup.send(msg, ephemeral=True)
     else:
         await interaction.response.send_message(msg, ephemeral=True)
+
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    guild_id = as_int(CONFIG.get("guild_id"))
+    if guild_id and member.guild.id != guild_id:
+        return
+
+    channel_id = as_int(CONFIG.get("welcome_channel_id"))
+    channel = member.guild.get_channel(channel_id) if channel_id else None
+    if not isinstance(channel, discord.TextChannel):
+        return
+
+    embed = discord.Embed(
+        title="⚖️ Bem-vindo ao Tribunal de Justiça",
+        description=(
+            f"Seja muito bem-vindo(a), {member.mention}, ao **Tribunal de Justiça**.\n\n"
+            "É uma satisfação receber você em nosso servidor. Leia as informações disponíveis "
+            "e conte com nossa equipe sempre que necessário."
+        ),
+        color=discord.Color.dark_red(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="👤 Usuário", value=f"{member}\n`{member.id}`", inline=True)
+    embed.add_field(name="👥 Membro nº", value=str(member.guild.member_count), inline=True)
+    embed.set_footer(text="Tribunal de Justiça • Sistema Integrado")
+
+    try:
+        await channel.send(content=member.mention, embed=embed)
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+
+@bot.event
+async def on_member_remove(member: discord.Member):
+    guild_id = as_int(CONFIG.get("guild_id"))
+    if guild_id and member.guild.id != guild_id:
+        return
+
+    channel_id = as_int(CONFIG.get("leave_channel_id"))
+    channel = member.guild.get_channel(channel_id) if channel_id else None
+    if not isinstance(channel, discord.TextChannel):
+        return
+
+    embed = discord.Embed(
+        title="🚪 Saída do Tribunal de Justiça",
+        description=(
+            f"**{member.display_name}** deixou o servidor do **Tribunal de Justiça**.\n\n"
+            "Agradecemos pelo período em que esteve conosco e desejamos tudo de bom em sua jornada."
+        ),
+        color=discord.Color.dark_red(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="👤 Usuário", value=f"{member}\n`{member.id}`", inline=False)
+    embed.set_footer(text="Tribunal de Justiça • Sistema Integrado")
+
+    try:
+        await channel.send(embed=embed)
+    except (discord.Forbidden, discord.HTTPException):
+        pass
 
 
 @bot.event
