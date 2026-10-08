@@ -41,7 +41,15 @@ DEFAULT_CONFIG = {
         "advogado": 0,
         "promotor": 0,
         "juiz": 0,
-        "oficial_justica": 0
+        "oficial_justica": 0,
+        "morador": 0,
+        "policia_federal": 0,
+        "policia_civil": 0,
+        "policia_penal": 0,
+        "policia_militar": 0,
+        "prf": 0,
+        "bope": 0,
+        "exercito": 0
     }
 }
 
@@ -265,6 +273,20 @@ SET_LABELS = {
     "promotor": "Promotor",
     "juiz": "Juiz",
     "oficial_justica": "Oficial de Justiça",
+    "morador": "Morador",
+    "policia_federal": "Polícia Federal",
+    "policia_civil": "Polícia Civil",
+    "policia_penal": "Polícia Penal",
+    "policia_militar": "Polícia Militar",
+    "prf": "PRF",
+    "bope": "BOPE",
+    "exercito": "Exército",
+}
+
+LEGAL_SET_KEYS = {"estagiario", "advogado", "promotor", "juiz", "oficial_justica"}
+IDENTIFICATION_SET_KEYS = {
+    "morador", "policia_federal", "policia_civil", "policia_penal",
+    "policia_militar", "prf", "bope", "exercito"
 }
 
 CITATION_TYPES = {
@@ -311,7 +333,7 @@ def parse_request_footer(embed: discord.Embed):
         if "=" in part:
             k, v = part.split("=", 1)
             result[k] = v
-    return as_int(result.get("user")), as_int(result.get("role"))
+    return as_int(result.get("user")), as_int(result.get("role")), str(result.get("setkey") or "")
 
 
 class SetRequestModal(discord.ui.Modal):
@@ -320,15 +342,28 @@ class SetRequestModal(discord.ui.Modal):
         self.role_key = role_key
         self.nome = discord.ui.TextInput(label="Nome no RP", max_length=80)
         self.passaporte = discord.ui.TextInput(label="ID / Passaporte", max_length=30)
-        self.obs = discord.ui.TextInput(
-            label="Observação",
-            style=discord.TextStyle.paragraph,
-            required=False,
-            max_length=500,
-        )
+
+        self.telefone = None
+        self.obs = None
+
         self.add_item(self.nome)
         self.add_item(self.passaporte)
-        self.add_item(self.obs)
+
+        if role_key in IDENTIFICATION_SET_KEYS:
+            self.telefone = discord.ui.TextInput(
+                label="Telefone",
+                placeholder="Ex.: 999-999",
+                max_length=30
+            )
+            self.add_item(self.telefone)
+        else:
+            self.obs = discord.ui.TextInput(
+                label="Observação",
+                style=discord.TextStyle.paragraph,
+                required=False,
+                max_length=500,
+            )
+            self.add_item(self.obs)
 
     async def on_submit(self, interaction: discord.Interaction):
         guild = interaction.guild
@@ -344,9 +379,14 @@ class SetRequestModal(discord.ui.Modal):
         embed.add_field(name="Solicitante", value=interaction.user.mention, inline=False)
         embed.add_field(name="Nome RP", value=str(self.nome), inline=True)
         embed.add_field(name="ID", value=str(self.passaporte), inline=True)
+
+        if self.role_key in IDENTIFICATION_SET_KEYS and self.telefone is not None:
+            embed.add_field(name="Telefone", value=str(self.telefone), inline=True)
+        elif self.obs is not None:
+            embed.add_field(name="Observação", value=str(self.obs) or "Nenhuma", inline=False)
+
         embed.add_field(name="Cargo solicitado", value=role.mention, inline=False)
-        embed.add_field(name="Observação", value=str(self.obs) or "Nenhuma", inline=False)
-        embed.set_footer(text=f"user={interaction.user.id}|role={role.id}")
+        embed.set_footer(text=f"user={interaction.user.id}|role={role.id}|setkey={self.role_key}")
 
         await review.send(embed=embed, view=SetApprovalView())
         await interaction.response.send_message("✅ Seu pedido de SET foi enviado para análise.", ephemeral=True)
@@ -367,7 +407,10 @@ class SetPanelView(discord.ui.View):
         super().__init__(timeout=None)
         for key, emoji, row in [
             ("estagiario", "📚", 0), ("advogado", "💼", 0), ("promotor", "⚖️", 0),
-            ("juiz", "👨‍⚖️", 1), ("oficial_justica", "📜", 1)
+            ("juiz", "👨‍⚖️", 1), ("oficial_justica", "📜", 1),
+            ("morador", "🏠", 2), ("policia_federal", "🛡️", 2), ("policia_civil", "🚔", 2),
+            ("policia_penal", "⛓️", 3), ("policia_militar", "👮", 3), ("prf", "🛣️", 3),
+            ("bope", "💀", 4), ("exercito", "🎖️", 4)
         ]:
             self.add_item(SetRoleButton(key, emoji, row))
 
@@ -383,18 +426,21 @@ class SetApprovalView(discord.ui.View):
         if not interaction.message or not interaction.message.embeds:
             return await interaction.response.send_message("❌ Solicitação inválida.", ephemeral=True)
 
-        uid, rid = parse_request_footer(interaction.message.embeds[0])
+        uid, rid, set_key = parse_request_footer(interaction.message.embeds[0])
         member = interaction.guild.get_member(uid) if interaction.guild else None
         role = interaction.guild.get_role(rid) if interaction.guild else None
         if not member or not role:
             return await interaction.response.send_message("❌ Usuário ou cargo não encontrado.", ephemeral=True)
 
         roles_to_add = [role]
-        oab_id = as_int(CONFIG.get("oab_role_id"))
-        if oab_id:
-            oab_role = interaction.guild.get_role(oab_id)
-            if oab_role and oab_role not in roles_to_add:
-                roles_to_add.append(oab_role)
+        # O cargo OAB continua sendo adicionado apenas aos SETs jurídicos.
+        # Solicitações antigas, sem setkey no rodapé, mantêm o comportamento anterior.
+        if not set_key or set_key in LEGAL_SET_KEYS:
+            oab_id = as_int(CONFIG.get("oab_role_id"))
+            if oab_id:
+                oab_role = interaction.guild.get_role(oab_id)
+                if oab_role and oab_role not in roles_to_add:
+                    roles_to_add.append(oab_role)
 
         try:
             await member.add_roles(*roles_to_add, reason=f"SET aprovado por {interaction.user}")
@@ -419,7 +465,7 @@ class SetApprovalView(discord.ui.View):
             return
         if not interaction.message or not interaction.message.embeds:
             return await interaction.response.send_message("❌ Solicitação inválida.", ephemeral=True)
-        uid, _ = parse_request_footer(interaction.message.embeds[0])
+        uid, _, _ = parse_request_footer(interaction.message.embeds[0])
         member = interaction.guild.get_member(uid) if interaction.guild else None
         embed = interaction.message.embeds[0]
         embed.title = "❌ SET negado"
@@ -721,7 +767,9 @@ def build_set_panel_embed():
     embed = discord.Embed(
         title="⚖️ SOLICITAÇÃO DE SET",
         description=("Selecione abaixo o cargo que deseja solicitar.\n\n"
-                     "📚 Estagiário\n💼 Advogado\n⚖️ Promotor\n👨‍⚖️ Juiz\n📜 Oficial de Justiça\n\n"
+                     "📚 Estagiário\n💼 Advogado\n⚖️ Promotor\n👨‍⚖️ Juiz\n📜 Oficial de Justiça\n"
+                     "🏠 Morador\n🛡️ Polícia Federal\n🚔 Polícia Civil\n⛓️ Polícia Penal\n"
+                     "👮 Polícia Militar\n🛣️ PRF\n💀 BOPE\n🎖️ Exército\n\n"
                      "Sua solicitação será enviada para análise."),
         color=discord.Color.magenta()
     )
@@ -897,7 +945,15 @@ def config_summary_embed(guild: discord.Guild):
             f"Advogado: {role_text('advogado', True)}\n"
             f"Promotor: {role_text('promotor', True)}\n"
             f"Juiz: {role_text('juiz', True)}\n"
-            f"Oficial de Justiça: {role_text('oficial_justica', True)}"
+            f"Oficial de Justiça: {role_text('oficial_justica', True)}\n"
+            f"Morador: {role_text('morador', True)}\n"
+            f"Polícia Federal: {role_text('policia_federal', True)}\n"
+            f"Polícia Civil: {role_text('policia_civil', True)}\n"
+            f"Polícia Penal: {role_text('policia_penal', True)}\n"
+            f"Polícia Militar: {role_text('policia_militar', True)}\n"
+            f"PRF: {role_text('prf', True)}\n"
+            f"BOPE: {role_text('bope', True)}\n"
+            f"Exército: {role_text('exercito', True)}"
         ), inline=False
     )
     ticket_staff = role_text("ticket_staff_role_id")
@@ -966,6 +1022,30 @@ class SetConfigView(discord.ui.View):
     async def imagem(self, interaction, button):
         if not await require_config_manager(interaction): return
         await interaction.response.send_modal(PanelImageModal("set_panel_image_url", "Imagem do painel de SET"))
+
+    @discord.ui.button(label="Morador", emoji="🏠", style=discord.ButtonStyle.secondary, row=3)
+    async def morador(self, interaction, button): await self._role(interaction, "set_roles.morador", "Morador")
+
+    @discord.ui.button(label="Polícia Federal", emoji="🛡️", style=discord.ButtonStyle.secondary, row=3)
+    async def policia_federal(self, interaction, button): await self._role(interaction, "set_roles.policia_federal", "Polícia Federal")
+
+    @discord.ui.button(label="Polícia Civil", emoji="🚔", style=discord.ButtonStyle.secondary, row=3)
+    async def policia_civil(self, interaction, button): await self._role(interaction, "set_roles.policia_civil", "Polícia Civil")
+
+    @discord.ui.button(label="Polícia Penal", emoji="⛓️", style=discord.ButtonStyle.secondary, row=3)
+    async def policia_penal(self, interaction, button): await self._role(interaction, "set_roles.policia_penal", "Polícia Penal")
+
+    @discord.ui.button(label="Polícia Militar", emoji="👮", style=discord.ButtonStyle.secondary, row=3)
+    async def policia_militar(self, interaction, button): await self._role(interaction, "set_roles.policia_militar", "Polícia Militar")
+
+    @discord.ui.button(label="PRF", emoji="🛣️", style=discord.ButtonStyle.secondary, row=4)
+    async def prf(self, interaction, button): await self._role(interaction, "set_roles.prf", "PRF")
+
+    @discord.ui.button(label="BOPE", emoji="💀", style=discord.ButtonStyle.secondary, row=4)
+    async def bope(self, interaction, button): await self._role(interaction, "set_roles.bope", "BOPE")
+
+    @discord.ui.button(label="Exército", emoji="🎖️", style=discord.ButtonStyle.secondary, row=4)
+    async def exercito(self, interaction, button): await self._role(interaction, "set_roles.exercito", "Exército")
 
 
 class TicketConfigView(discord.ui.View):
