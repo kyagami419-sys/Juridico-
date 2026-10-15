@@ -55,7 +55,8 @@ DEFAULT_CONFIG = {
         "oficial_justica": 0,
         "procurador": 0,
         "promotor": 0,
-        "advogado": 0
+        "advogado": 0,
+        "presidente_oab": 0
     },
     "absences": [],
     "set_panel_image_url": "",
@@ -1748,7 +1749,8 @@ def config_summary_embed(guild: discord.Guild):
             f"Oficial de Justiça: {jud_status_role_text('oficial_justica')}\n"
             f"Procurador: {jud_status_role_text('procurador')}\n"
             f"Promotor: {jud_status_role_text('promotor')}\n"
-            f"Advogado: {jud_status_role_text('advogado')}"
+            f"Advogado: {jud_status_role_text('advogado')}\n"
+            f"Presidente da OAB: {jud_status_role_text('presidente_oab')}"
         ),
         inline=False
     )
@@ -2054,6 +2056,7 @@ JUD_STATUS_ROLES = {
     "procurador": ("Procuradores", "💼"),
     "promotor": ("Promotores", "⚖️"),
     "advogado": ("Advogados", "📚"),
+    "presidente_oab": ("Presidência da OAB", "🏅"),
 }
 
 
@@ -2119,12 +2122,27 @@ def build_jud_status_embeds(guild: discord.Guild):
     return embeds
 
 
+def build_jud_status_transition_embed(step: int = 1):
+    frames = {
+        1: "▰▱▱  Carregando cargos...",
+        2: "▰▰▱  Sincronizando membros...",
+        3: "▰▰▰  Finalizando atualização...",
+    }
+    embed = discord.Embed(
+        title="🔄 Atualizando Quadro Jurídico",
+        description=frames.get(step, frames[1]),
+        color=discord.Color.magenta(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text="Tribunal de Justiça • Atualização automática")
+    return embed
+
+
 async def update_jud_status_message(guild: discord.Guild):
     channel = _jud_status_channel(guild)
     if not channel:
         return False, "Canal do Status Jurídico não configurado."
 
-    embeds = build_jud_status_embeds(guild)
     message = None
     message_id = as_int(CONFIG.get("jud_status_message_id"))
 
@@ -2137,12 +2155,22 @@ async def update_jud_status_message(guild: discord.Guild):
             message = None
 
     try:
+        # Pequena transição visual antes de cada atualização do quadro.
         if message:
-            await message.edit(content=None, embeds=embeds)
+            await message.edit(content=None, embeds=[build_jud_status_transition_embed(1)])
         else:
-            message = await channel.send(embeds=embeds)
+            message = await channel.send(embed=build_jud_status_transition_embed(1))
             CONFIG["jud_status_message_id"] = message.id
             save_config()
+
+        await asyncio.sleep(0.6)
+        await message.edit(content=None, embeds=[build_jud_status_transition_embed(2)])
+        await asyncio.sleep(0.6)
+        await message.edit(content=None, embeds=[build_jud_status_transition_embed(3)])
+        await asyncio.sleep(0.6)
+
+        embeds = build_jud_status_embeds(guild)
+        await message.edit(content=None, embeds=embeds)
     except (discord.Forbidden, discord.HTTPException) as error:
         return False, str(error)
 
@@ -2216,7 +2244,11 @@ class JudStatusConfigView(discord.ui.View):
     async def advogado(self, interaction, button):
         await self._role(interaction, "advogado", "Advogado")
 
-    @discord.ui.button(label="Publicar / Atualizar", emoji="🔄", style=discord.ButtonStyle.success, row=3)
+    @discord.ui.button(label="Presidente da OAB", emoji="🏅", style=discord.ButtonStyle.secondary, row=3)
+    async def presidente_oab(self, interaction, button):
+        await self._role(interaction, "presidente_oab", "Presidente da OAB")
+
+    @discord.ui.button(label="Publicar / Atualizar", emoji="🔄", style=discord.ButtonStyle.success, row=4)
     async def publish_status(self, interaction, button):
         if not await require_config_manager(interaction): return
         if not interaction.guild:
