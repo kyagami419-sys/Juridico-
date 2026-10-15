@@ -21,6 +21,16 @@
   "message_log_channel_id": 1560347655048134717,
   "jud_notice_channel_id": 1556073504594599983,
   "jud_notice_role_id": 1556391535749111828,
+  "jud_status_channel_id": 1556073504221302863,
+  "jud_status_message_id": 1560377761229570216,
+  "jud_status_roles": {
+    "desembargador": 1556073503739093089,
+    "juiz": 1556073503739093082,
+    "oficial_justica": 1556073503722184766,
+    "procurador": 1556073503722184768,
+    "promotor": 1556073503722184767,
+    "advogado": 1556073503709597740
+  },
   "absences": [],
   "set_panel_image_url": "https://cdn.discordapp.com/attachments/1556073507774005264/1557455045350662144/emblema_dourado_da_justica_animado.gif?backend=b2&ex=6ac8854a&is=6ac733ca&hm=8a5ca6c4878a4805c827be5b73b9fc7a7cf77faafaa4eec7b6645eef65b4b50e&",
   "ticket_panel_image_url": "https://cdn.discordapp.com/attachments/1556073507774005264/1557455045350662144/emblema_dourado_da_justica_animado.gif?backend=b2&ex=6ac8854a&is=6ac733ca&hm=8a5ca6c4878a4805c827be5b73b9fc7a7cf77faafaa4eec7b6645eef65b4b50e&",
