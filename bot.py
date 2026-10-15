@@ -40,6 +40,11 @@ DEFAULT_CONFIG = {
     "absence_channel_id": 0,
     "absence_log_channel_id": 0,
     "absence_role_id": 0,
+    "general_log_channel_id": 0,
+    "role_log_channel_id": 0,
+    "voice_log_channel_id": 0,
+    "nickname_log_channel_id": 0,
+    "message_log_channel_id": 0,
     "absences": [],
     "set_panel_image_url": "",
     "ticket_panel_image_url": "",
@@ -1355,6 +1360,57 @@ class PanelImageModal(discord.ui.Modal):
         await interaction.response.send_message("✅ Imagem atualizada." if value else "✅ Imagem removida.", ephemeral=True)
 
 
+
+def _get_text_channel(guild: discord.Guild, config_key: str):
+    channel_id = as_int(CONFIG.get(config_key))
+    channel = guild.get_channel(channel_id) if channel_id else None
+    return channel if isinstance(channel, discord.TextChannel) else None
+
+
+async def _send_server_log(guild: discord.Guild, embed: discord.Embed, specific_key: str = None):
+    """Envia o evento ao log geral e, quando configurado, ao log específico."""
+    channel_ids = []
+
+    general = _get_text_channel(guild, "general_log_channel_id")
+    if general:
+        channel_ids.append(general.id)
+
+    if specific_key:
+        specific = _get_text_channel(guild, specific_key)
+        if specific and specific.id not in channel_ids:
+            channel_ids.append(specific.id)
+
+    for channel_id in channel_ids:
+        channel = guild.get_channel(channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            continue
+        try:
+            await channel.send(embed=embed)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+
+async def _recent_audit_actor(guild: discord.Guild, action: discord.AuditLogAction, target_id: int):
+    """Tenta identificar quem realizou uma alteração pelo Registro de Auditoria."""
+    me = guild.me
+    if not me or not me.guild_permissions.view_audit_log:
+        return None
+
+    # O Discord pode levar alguns instantes para registrar a entrada na auditoria.
+    await asyncio.sleep(0.8)
+    try:
+        now = discord.utils.utcnow()
+        async for entry in guild.audit_logs(limit=8, action=action):
+            target = getattr(entry, "target", None)
+            if getattr(target, "id", None) != target_id:
+                continue
+            age = abs((now - entry.created_at).total_seconds())
+            if age <= 20:
+                return entry.user
+    except (discord.Forbidden, discord.HTTPException):
+        return None
+    return None
+
 def config_summary_embed(guild: discord.Guild):
     def role_text(key, nested=False):
         rid = as_int(CONFIG.get("set_roles", {}).get(key)) if nested else as_int(CONFIG.get(key))
@@ -1425,6 +1481,17 @@ def config_summary_embed(guild: discord.Guild):
             f"Canal do painel: {channel_text('absence_channel_id')}\n"
             f"Canal de logs: {channel_text('absence_log_channel_id')}\n"
             f"Cargo autorizado: {role_text('absence_role_id')}"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="🗂️ LOGS DO SERVIDOR",
+        value=(
+            f"Log geral: {channel_text('general_log_channel_id')}\n"
+            f"Cargos: {channel_text('role_log_channel_id')}\n"
+            f"Calls: {channel_text('voice_log_channel_id')}\n"
+            f"Alteração de nomes: {channel_text('nickname_log_channel_id')}\n"
+            f"Mensagens: {channel_text('message_log_channel_id')}"
         ),
         inline=False
     )
@@ -1623,6 +1690,56 @@ class AbsenceConfigView(discord.ui.View):
         await interaction.response.send_message(f"✅ Painel de ausência publicado em {channel.mention}.", ephemeral=True)
 
 
+class ServerLogsConfigView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+
+    @discord.ui.button(label="Log geral", emoji="📋", style=discord.ButtonStyle.primary, row=0)
+    async def general_log(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message(
+            "Selecione o canal que receberá uma cópia de todos os logs configurados abaixo:",
+            view=ConfigTextChannelSelectView("general_log_channel_id", "Canal de log geral"),
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Log de cargos", emoji="🏷️", style=discord.ButtonStyle.secondary, row=0)
+    async def role_log(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message(
+            "Selecione o canal que receberá alterações de cargos dos membros:",
+            view=ConfigTextChannelSelectView("role_log_channel_id", "Canal de log de cargos"),
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Log de call", emoji="🔊", style=discord.ButtonStyle.secondary, row=0)
+    async def voice_log(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message(
+            "Selecione o canal que receberá entradas, saídas e trocas de call:",
+            view=ConfigTextChannelSelectView("voice_log_channel_id", "Canal de log de call"),
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Log de nomes", emoji="✏️", style=discord.ButtonStyle.secondary, row=1)
+    async def nickname_log(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message(
+            "Selecione o canal que receberá alterações de nome/apelido no servidor:",
+            view=ConfigTextChannelSelectView("nickname_log_channel_id", "Canal de log de alteração de nomes"),
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Log de mensagens", emoji="💬", style=discord.ButtonStyle.secondary, row=1)
+    async def message_log(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message(
+            "Selecione o canal que receberá uma cópia das mensagens enviadas pelos membros:",
+            view=ConfigTextChannelSelectView("message_log_channel_id", "Canal de log de mensagens"),
+            ephemeral=True
+        )
+
+
 class ConfigMainView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=600)
@@ -1651,6 +1768,11 @@ class ConfigMainView(discord.ui.View):
     async def absence_config(self, interaction, button):
         if not await require_config_manager(interaction): return
         await interaction.response.send_message("⚙️ **Configuração do sistema de ausências**", view=AbsenceConfigView(), ephemeral=True)
+
+    @discord.ui.button(label="Logs", emoji="🗂️", style=discord.ButtonStyle.secondary, row=2)
+    async def logs_config(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message("⚙️ **Configuração dos logs do servidor**", view=ServerLogsConfigView(), ephemeral=True)
 
     @discord.ui.button(label="Ver configuração", emoji="🔎", style=discord.ButtonStyle.secondary, row=0)
     async def summary(self, interaction, button):
@@ -1722,6 +1844,97 @@ async def on_tree_error(interaction: discord.Interaction, error: app_commands.Ap
         await interaction.response.send_message(msg, ephemeral=True)
 
 
+
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    guild_id = as_int(CONFIG.get("guild_id"))
+    if guild_id and after.guild.id != guild_id:
+        return
+
+    before_roles = {role.id: role for role in before.roles if not role.is_default()}
+    after_roles = {role.id: role for role in after.roles if not role.is_default()}
+    added_ids = [rid for rid in after_roles if rid not in before_roles]
+    removed_ids = [rid for rid in before_roles if rid not in after_roles]
+
+    if added_ids or removed_ids:
+        actor = await _recent_audit_actor(after.guild, discord.AuditLogAction.member_role_update, after.id)
+        embed = discord.Embed(
+            title="🏷️ Alteração de cargos",
+            color=discord.Color.gold(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.add_field(name="Membro", value=f"{after.mention}\n`{after.id}`", inline=False)
+        if added_ids:
+            embed.add_field(
+                name="➕ Cargos adicionados",
+                value="\n".join(after_roles[rid].mention for rid in added_ids)[:1024],
+                inline=False
+            )
+        if removed_ids:
+            embed.add_field(
+                name="➖ Cargos removidos",
+                value="\n".join(before_roles[rid].mention for rid in removed_ids)[:1024],
+                inline=False
+            )
+        embed.add_field(
+            name="Alterado por",
+            value=f"{actor.mention} (`{actor.id}`)" if actor else "Não identificado / sem acesso à auditoria",
+            inline=False
+        )
+        embed.set_thumbnail(url=after.display_avatar.url)
+        await _send_server_log(after.guild, embed, "role_log_channel_id")
+
+    if before.display_name != after.display_name:
+        actor = await _recent_audit_actor(after.guild, discord.AuditLogAction.member_update, after.id)
+        embed = discord.Embed(
+            title="✏️ Nome alterado",
+            color=discord.Color.orange(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.add_field(name="Membro", value=f"{after.mention}\n`{after.id}`", inline=False)
+        embed.add_field(name="Antes", value=before.display_name or "Sem nome", inline=True)
+        embed.add_field(name="Depois", value=after.display_name or "Sem nome", inline=True)
+        embed.add_field(
+            name="Alterado por",
+            value=f"{actor.mention} (`{actor.id}`)" if actor else "Não identificado / alteração de perfil",
+            inline=False
+        )
+        embed.set_thumbnail(url=after.display_avatar.url)
+        await _send_server_log(after.guild, embed, "nickname_log_channel_id")
+
+
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    guild_id = as_int(CONFIG.get("guild_id"))
+    if guild_id and member.guild.id != guild_id:
+        return
+
+    if before.channel == after.channel:
+        return
+
+    if before.channel is None and after.channel is not None:
+        title = "🔊 Entrada em call"
+        color = discord.Color.green()
+        description = f"{member.mention} entrou em {after.channel.mention}."
+    elif before.channel is not None and after.channel is None:
+        title = "🔇 Saída da call"
+        color = discord.Color.red()
+        description = f"{member.mention} saiu de **{before.channel.name}**."
+    else:
+        title = "🔄 Troca de call"
+        color = discord.Color.blurple()
+        description = f"{member.mention} saiu de **{before.channel.name}** e entrou em {after.channel.mention}."
+
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=color,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="Membro", value=f"{member}\n`{member.id}`", inline=False)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    await _send_server_log(member.guild, embed, "voice_log_channel_id")
+
 @bot.event
 async def on_member_join(member: discord.Member):
     guild_id = as_int(CONFIG.get("guild_id"))
@@ -1786,7 +1999,7 @@ async def on_member_remove(member: discord.Member):
 
 @bot.event
 async def on_message(message: discord.Message):
-    # Mantém o restante do bot intacto e atua somente no canal configurado para ban automático.
+    # Ignora mensagens de bots para evitar loops nos próprios canais de log.
     if message.author.bot or not message.guild:
         return
 
@@ -1794,6 +2007,32 @@ async def on_message(message: discord.Message):
     if guild_id and message.guild.id != guild_id:
         return
 
+    # LOG DE MENSAGENS: registra todas as mensagens enviadas por membros.
+    if _get_text_channel(message.guild, "general_log_channel_id") or _get_text_channel(message.guild, "message_log_channel_id"):
+        content = (message.content or "").strip()
+        if not content:
+            content = "*[Mensagem sem conteúdo de texto]*"
+        if len(content) > 3500:
+            content = content[:3500] + "…"
+
+        embed = discord.Embed(
+            title="💬 Mensagem enviada",
+            description=content,
+            color=discord.Color.dark_grey(),
+            timestamp=message.created_at
+        )
+        embed.add_field(name="Autor", value=f"{message.author.mention}\n`{message.author.id}`", inline=True)
+        embed.add_field(name="Canal", value=message.channel.mention, inline=True)
+        embed.add_field(name="Mensagem", value=f"[Ir para a mensagem]({message.jump_url})", inline=False)
+
+        if message.attachments:
+            links = "\n".join(f"[{a.filename}]({a.url})" for a in message.attachments)
+            embed.add_field(name="Anexos", value=links[:1024], inline=False)
+
+        embed.set_thumbnail(url=message.author.display_avatar.url)
+        await _send_server_log(message.guild, embed, "message_log_channel_id")
+
+    # Mantém exatamente a função já existente de banimento automático.
     ban_channel_id = as_int(CONFIG.get("ban_channel_id"))
     if not ban_channel_id or message.channel.id != ban_channel_id:
         return
