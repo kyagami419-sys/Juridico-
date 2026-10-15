@@ -4,11 +4,12 @@ import re
 import html
 import json
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, time
+from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 import pymysql
 
@@ -36,6 +37,10 @@ DEFAULT_CONFIG = {
     "ban_log_channel_id": 0,
     "welcome_channel_id": 0,
     "leave_channel_id": 0,
+    "absence_channel_id": 0,
+    "absence_log_channel_id": 0,
+    "absence_role_id": 0,
+    "absences": [],
     "set_panel_image_url": "",
     "ticket_panel_image_url": "",
     "set_roles": {
@@ -311,6 +316,7 @@ class JuridicoBot(commands.Bot):
         self.add_view(SetApprovalView())
         self.add_view(TicketPanelView())
         self.add_view(TicketActionsView())
+        self.add_view(AbsencePanelView())
 
         guild_id = as_int(CONFIG.get("guild_id"))
         if guild_id:
@@ -813,6 +819,284 @@ class TicketActionsView(discord.ui.View):
         await finalize_ticket(interaction)
 
 
+# =========================
+# SISTEMA DE AUSÊNCIAS
+# =========================
+
+BR_TZ = ZoneInfo("America/Sao_Paulo")
+
+
+def _absence_role(guild: discord.Guild):
+    role_id = as_int(CONFIG.get("absence_role_id"))
+    return guild.get_role(role_id) if role_id else None
+
+
+def _absence_log_channel(guild: discord.Guild):
+    channel_id = as_int(CONFIG.get("absence_log_channel_id"))
+    channel = guild.get_channel(channel_id) if channel_id else None
+    return channel if isinstance(channel, discord.TextChannel) else None
+
+
+def _absence_panel_channel(guild: discord.Guild):
+    channel_id = as_int(CONFIG.get("absence_channel_id"))
+    channel = guild.get_channel(channel_id) if channel_id else None
+    return channel if isinstance(channel, discord.TextChannel) else None
+
+
+def _parse_br_date(value: str):
+    try:
+        return datetime.strptime(value.strip(), "%d/%m/%Y").date()
+    except ValueError:
+        return None
+
+
+def _active_absence_for_user(user_id: int):
+    for record in CONFIG.get("absences", []):
+        if as_int(record.get("user_id")) == user_id and record.get("status") == "active":
+            return record
+    return None
+
+
+def _new_absence_id() -> int:
+    ids = [as_int(item.get("absence_id")) for item in CONFIG.get("absences", [])]
+    return (max(ids) if ids else 0) + 1
+
+
+def build_absence_panel_embed(guild: discord.Guild | None = None):
+    role = _absence_role(guild) if guild else None
+    role_text = role.mention if role else "cargo autorizado"
+    embed = discord.Embed(
+        title="📅 REGISTRO DE AUSÊNCIA",
+        description=(
+            f"Painel destinado aos membros com {role_text}.\n\n"
+            "Clique no botão abaixo para registrar sua ausência.\n"
+            "Você deverá informar **Nome, ID, motivo, data de saída e data de retorno**."
+        ),
+        color=discord.Color.dark_red()
+    )
+    embed.set_footer(text="Tribunal de Justiça • Controle de Ausências")
+    return embed
+
+
+class AbsenceRequestModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Registrar ausência")
+        self.nome = discord.ui.TextInput(label="Nome", placeholder="Seu nome", max_length=100)
+        self.identificacao = discord.ui.TextInput(label="ID", placeholder="Seu ID / passaporte", max_length=30)
+        self.motivo = discord.ui.TextInput(
+            label="Motivo",
+            placeholder="Informe o motivo da ausência",
+            style=discord.TextStyle.paragraph,
+            max_length=1000
+        )
+        self.data_saida = discord.ui.TextInput(label="Data de saída", placeholder="DD/MM/AAAA", max_length=10)
+        self.data_retorno = discord.ui.TextInput(label="Data de retorno", placeholder="DD/MM/AAAA", max_length=10)
+
+        self.add_item(self.nome)
+        self.add_item(self.identificacao)
+        self.add_item(self.motivo)
+        self.add_item(self.data_saida)
+        self.add_item(self.data_retorno)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if not guild or not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message("❌ Use este painel dentro do servidor.", ephemeral=True)
+
+        role = _absence_role(guild)
+        if not role:
+            return await interaction.response.send_message("❌ O cargo autorizado para ausências ainda não foi configurado.", ephemeral=True)
+        if not interaction.user.guild_permissions.administrator and role not in interaction.user.roles:
+            return await interaction.response.send_message(
+                f"❌ Apenas membros com o cargo {role.mention} podem registrar ausência.",
+                ephemeral=True
+            )
+
+        log_channel = _absence_log_channel(guild)
+        if not log_channel:
+            return await interaction.response.send_message("❌ O canal de logs de ausência ainda não foi configurado.", ephemeral=True)
+
+        current = _active_absence_for_user(interaction.user.id)
+        if current:
+            end_ts = as_int(current.get("end_at"))
+            return await interaction.response.send_message(
+                f"⚠️ Você já possui uma ausência ativa com retorno previsto <t:{end_ts}:R>.",
+                ephemeral=True
+            )
+
+        start_date = _parse_br_date(str(self.data_saida))
+        return_date = _parse_br_date(str(self.data_retorno))
+        if not start_date or not return_date:
+            return await interaction.response.send_message(
+                "❌ Data inválida. Use o formato **DD/MM/AAAA**. Exemplo: `25/10/2026`.",
+                ephemeral=True
+            )
+        if return_date < start_date:
+            return await interaction.response.send_message(
+                "❌ A data de retorno não pode ser anterior à data de saída.",
+                ephemeral=True
+            )
+
+        start_dt = datetime.combine(start_date, time.min, tzinfo=BR_TZ)
+        end_dt = datetime.combine(return_date, time(23, 59, 59), tzinfo=BR_TZ)
+        now = datetime.now(BR_TZ)
+        if end_dt <= now:
+            return await interaction.response.send_message(
+                "❌ A data de retorno precisa ser futura.",
+                ephemeral=True
+            )
+
+        absence_id = _new_absence_id()
+        start_ts = int(start_dt.timestamp())
+        end_ts = int(end_dt.timestamp())
+        created_ts = int(now.timestamp())
+        duration_seconds = max(0, end_ts - start_ts)
+        total_days = duration_seconds // 86400
+        remaining = max(0, end_ts - int(now.timestamp()))
+        rem_days, rem_rest = divmod(remaining, 86400)
+        rem_hours = rem_rest // 3600
+
+        record = {
+            "absence_id": absence_id,
+            "guild_id": guild.id,
+            "user_id": interaction.user.id,
+            "discord_name": str(interaction.user),
+            "name": str(self.nome).strip(),
+            "rp_id": str(self.identificacao).strip(),
+            "reason": str(self.motivo).strip(),
+            "start_at": start_ts,
+            "end_at": end_ts,
+            "created_at": created_ts,
+            "status": "active",
+            "log_message_id": 0,
+            "expired_notified_at": 0,
+        }
+        CONFIG.setdefault("absences", []).append(record)
+        save_config()
+
+        embed = discord.Embed(
+            title="📅 Nova ausência registrada",
+            color=discord.Color.dark_red(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.add_field(name="Membro", value=interaction.user.mention, inline=False)
+        embed.add_field(name="Nome", value=record["name"], inline=True)
+        embed.add_field(name="ID", value=record["rp_id"], inline=True)
+        embed.add_field(name="Motivo", value=record["reason"], inline=False)
+        embed.add_field(name="Data de saída", value=f"<t:{start_ts}:D>", inline=True)
+        embed.add_field(name="Data de retorno", value=f"<t:{end_ts}:D>", inline=True)
+        embed.add_field(name="Duração informada", value=f"{total_days + 1} dia(s)", inline=True)
+        embed.add_field(
+            name="⏳ Tempo restante",
+            value=f"<t:{end_ts}:R>\nAproximadamente **{rem_days}d {rem_hours}h** restantes.",
+            inline=False
+        )
+        embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        embed.set_footer(text=f"Ausência #{absence_id} • Tribunal de Justiça")
+
+        try:
+            log_message = await log_channel.send(embed=embed)
+            record["log_message_id"] = log_message.id
+            save_config()
+        except (discord.Forbidden, discord.HTTPException):
+            return await interaction.response.send_message(
+                "⚠️ A ausência foi registrada, mas o bot não conseguiu enviar a log. Verifique as permissões do canal.",
+                ephemeral=True
+            )
+
+        await interaction.response.send_message(
+            f"✅ Ausência registrada com sucesso. Seu retorno está previsto <t:{end_ts}:R>.",
+            ephemeral=True
+        )
+
+
+class AbsencePanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Registrar ausência",
+        emoji="📅",
+        style=discord.ButtonStyle.danger,
+        custom_id="absence:register"
+    )
+    async def register_absence(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        if not guild or not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message("❌ Use este painel dentro do servidor.", ephemeral=True)
+        role = _absence_role(guild)
+        if not role:
+            return await interaction.response.send_message("❌ O cargo autorizado ainda não foi configurado.", ephemeral=True)
+        if not interaction.user.guild_permissions.administrator and role not in interaction.user.roles:
+            return await interaction.response.send_message(
+                f"❌ Este painel é restrito ao cargo {role.mention}.",
+                ephemeral=True
+            )
+        await interaction.response.send_modal(AbsenceRequestModal())
+
+
+@tasks.loop(minutes=1)
+async def absence_expiry_watcher():
+    if not bot.is_ready():
+        return
+
+    now_ts = int(datetime.now(BR_TZ).timestamp())
+    changed = False
+
+    for record in CONFIG.get("absences", []):
+        if record.get("status") != "active":
+            continue
+        if as_int(record.get("end_at")) > now_ts:
+            continue
+
+        guild = bot.get_guild(as_int(record.get("guild_id")) or as_int(CONFIG.get("guild_id")))
+        if not guild:
+            continue
+
+        log_channel = _absence_log_channel(guild)
+        member = guild.get_member(as_int(record.get("user_id")))
+        manager = guild.get_member(as_int(CONFIG.get("manager_user_id"))) or guild.owner
+
+        embed = discord.Embed(
+            title="⏰ Prazo de ausência encerrado",
+            description="O período de ausência informado chegou ao fim.",
+            color=discord.Color.orange(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.add_field(name="Nome", value=str(record.get("name") or "Não informado"), inline=True)
+        embed.add_field(name="ID", value=str(record.get("rp_id") or "Não informado"), inline=True)
+        embed.add_field(
+            name="Membro",
+            value=member.mention if member else f"`{record.get('user_id')}`",
+            inline=False
+        )
+        embed.add_field(name="Motivo", value=str(record.get("reason") or "Não informado"), inline=False)
+        embed.add_field(name="Retorno previsto", value=f"<t:{as_int(record.get('end_at'))}:F>", inline=False)
+        embed.set_footer(text=f"Ausência #{as_int(record.get('absence_id'))} • Tribunal de Justiça")
+
+        mention = manager.mention if manager else None
+        if log_channel:
+            try:
+                await log_channel.send(content=mention, embed=embed)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+
+        if manager:
+            await safe_dm(manager, embed=embed)
+
+        record["status"] = "expired"
+        record["expired_notified_at"] = now_ts
+        changed = True
+
+    if changed:
+        save_config()
+
+
+@absence_expiry_watcher.before_loop
+async def before_absence_expiry_watcher():
+    await bot.wait_until_ready()
+
+
 def build_set_panel_embed():
     embed = discord.Embed(
         title="⚖️ SOLICITAÇÃO DE SET",
@@ -943,6 +1227,19 @@ async def painel_set(interaction: discord.Interaction):
 async def painel_ticket(interaction: discord.Interaction):
     embed = build_ticket_panel_embed()
     await interaction.response.send_message(embed=embed, view=TicketPanelView())
+
+
+@bot.tree.command(name="painel_ausencia", description="Envia o painel de registro de ausências neste canal.")
+@app_commands.checks.has_permissions(administrator=True)
+async def painel_ausencia(interaction: discord.Interaction):
+    if not interaction.guild:
+        return await interaction.response.send_message("❌ Use este comando dentro do servidor.", ephemeral=True)
+    if not _absence_role(interaction.guild) or not _absence_log_channel(interaction.guild):
+        return await interaction.response.send_message(
+            "❌ Configure primeiro o cargo autorizado e o canal de logs em `/configuracoes` → **Ausências**.",
+            ephemeral=True
+        )
+    await interaction.response.send_message(embed=build_absence_panel_embed(interaction.guild), view=AbsencePanelView())
 
 
 
@@ -1123,6 +1420,15 @@ def config_summary_embed(guild: discord.Guild):
         inline=False
     )
     embed.add_field(
+        name="📅 AUSÊNCIAS",
+        value=(
+            f"Canal do painel: {channel_text('absence_channel_id')}\n"
+            f"Canal de logs: {channel_text('absence_log_channel_id')}\n"
+            f"Cargo autorizado: {role_text('absence_role_id')}"
+        ),
+        inline=False
+    )
+    embed.add_field(
         name="🖼️ Imagens",
         value=(
             f"Painel SET: {'✅ Configurada' if CONFIG.get('set_panel_image_url') else 'Não configurada'}\n"
@@ -1267,6 +1573,56 @@ class MemberLogConfigView(discord.ui.View):
         )
 
 
+class AbsenceConfigView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+
+    @discord.ui.button(label="Cargo autorizado", emoji="👥", style=discord.ButtonStyle.primary, row=0)
+    async def allowed_role(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message(
+            "Selecione o cargo que poderá registrar ausências:",
+            view=ConfigRoleSelectView("absence_role_id", "Cargo autorizado para ausências"),
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Canal de ausência", emoji="📅", style=discord.ButtonStyle.primary, row=0)
+    async def panel_channel(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message(
+            "Selecione o canal onde ficará o painel de registro de ausência:",
+            view=ConfigTextChannelSelectView("absence_channel_id", "Canal do painel de ausência"),
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Canal de logs", emoji="🗂️", style=discord.ButtonStyle.primary, row=0)
+    async def log_channel(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message(
+            "Selecione o canal que receberá os registros e avisos de ausência:",
+            view=ConfigTextChannelSelectView("absence_log_channel_id", "Canal de logs de ausência"),
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Publicar painel", emoji="📌", style=discord.ButtonStyle.success, row=1)
+    async def publish_panel(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ Use dentro do servidor.", ephemeral=True)
+        channel = _absence_panel_channel(interaction.guild)
+        if not channel:
+            return await interaction.response.send_message("❌ Configure primeiro o canal de ausência.", ephemeral=True)
+        if not _absence_role(interaction.guild):
+            return await interaction.response.send_message("❌ Configure primeiro o cargo autorizado.", ephemeral=True)
+        if not _absence_log_channel(interaction.guild):
+            return await interaction.response.send_message("❌ Configure primeiro o canal de logs.", ephemeral=True)
+        try:
+            await channel.send(embed=build_absence_panel_embed(interaction.guild), view=AbsencePanelView())
+        except (discord.Forbidden, discord.HTTPException) as error:
+            return await interaction.response.send_message(f"❌ Não foi possível publicar o painel: `{error}`", ephemeral=True)
+        await interaction.response.send_message(f"✅ Painel de ausência publicado em {channel.mention}.", ephemeral=True)
+
+
 class ConfigMainView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=600)
@@ -1290,6 +1646,11 @@ class ConfigMainView(discord.ui.View):
     async def member_logs_config(self, interaction, button):
         if not await require_config_manager(interaction): return
         await interaction.response.send_message("⚙️ **Configuração de boas-vindas e saída**", view=MemberLogConfigView(), ephemeral=True)
+
+    @discord.ui.button(label="Ausências", emoji="📅", style=discord.ButtonStyle.secondary, row=2)
+    async def absence_config(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message("⚙️ **Configuração do sistema de ausências**", view=AbsenceConfigView(), ephemeral=True)
 
     @discord.ui.button(label="Ver configuração", emoji="🔎", style=discord.ButtonStyle.secondary, row=0)
     async def summary(self, interaction, button):
@@ -1495,6 +1856,8 @@ async def on_message(message: discord.Message):
 @bot.event
 async def on_ready():
     print(f"Conectado como {bot.user} ({bot.user.id})")
+    if not absence_expiry_watcher.is_running():
+        absence_expiry_watcher.start()
 
 
 token = os.getenv("DISCORD_TOKEN")
