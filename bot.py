@@ -47,6 +47,16 @@ DEFAULT_CONFIG = {
     "message_log_channel_id": 0,
     "jud_notice_channel_id": 0,
     "jud_notice_role_id": 0,
+    "jud_status_channel_id": 0,
+    "jud_status_message_id": 0,
+    "jud_status_roles": {
+        "desembargador": 0,
+        "juiz": 0,
+        "oficial_justica": 0,
+        "procurador": 0,
+        "promotor": 0,
+        "advogado": 0
+    },
     "absences": [],
     "set_panel_image_url": "",
     "ticket_panel_image_url": "",
@@ -1482,6 +1492,9 @@ class ConfigRoleSelect(discord.ui.RoleSelect):
         if self.key.startswith("set_roles."):
             subkey = self.key.split(".", 1)[1]
             CONFIG.setdefault("set_roles", {})[subkey] = role.id
+        elif self.key.startswith("jud_status_roles."):
+            subkey = self.key.split(".", 1)[1]
+            CONFIG.setdefault("jud_status_roles", {})[subkey] = role.id
         else:
             CONFIG[self.key] = role.id
         save_config()
@@ -1717,6 +1730,25 @@ def config_summary_embed(guild: discord.Guild):
         value=(
             f"Canal do painel: {channel_text('jud_notice_channel_id')}\n"
             f"Cargo autorizado: {role_text('jud_notice_role_id')}"
+        ),
+        inline=False
+    )
+
+    def jud_status_role_text(key):
+        rid = as_int(CONFIG.get("jud_status_roles", {}).get(key))
+        role = guild.get_role(rid) if rid else None
+        return role.mention if role else "❌ Não configurado"
+
+    embed.add_field(
+        name="⚖️ STATUS JURÍDICO",
+        value=(
+            f"Canal: {channel_text('jud_status_channel_id')}\n"
+            f"Desembargador: {jud_status_role_text('desembargador')}\n"
+            f"Juiz: {jud_status_role_text('juiz')}\n"
+            f"Oficial de Justiça: {jud_status_role_text('oficial_justica')}\n"
+            f"Procurador: {jud_status_role_text('procurador')}\n"
+            f"Promotor: {jud_status_role_text('promotor')}\n"
+            f"Advogado: {jud_status_role_text('advogado')}"
         ),
         inline=False
     )
@@ -2015,6 +2047,192 @@ class JudNoticeConfigView(discord.ui.View):
         )
 
 
+JUD_STATUS_ROLES = {
+    "desembargador": ("Desembargadores", "🏛️"),
+    "juiz": ("Juízes", "👨‍⚖️"),
+    "oficial_justica": ("Oficiais de Justiça", "📜"),
+    "procurador": ("Procuradores", "💼"),
+    "promotor": ("Promotores", "⚖️"),
+    "advogado": ("Advogados", "📚"),
+}
+
+
+def _jud_status_channel(guild: discord.Guild):
+    channel_id = as_int(CONFIG.get("jud_status_channel_id"))
+    channel = guild.get_channel(channel_id) if channel_id else None
+    return channel if isinstance(channel, discord.TextChannel) else None
+
+
+def _jud_status_role(guild: discord.Guild, key: str):
+    role_id = as_int(CONFIG.get("jud_status_roles", {}).get(key))
+    return guild.get_role(role_id) if role_id else None
+
+
+def _status_member_lines(role: discord.Role):
+    members = sorted(
+        (member for member in role.members if not member.bot),
+        key=lambda member: member.display_name.casefold()
+    )
+    if not members:
+        return ["*Nenhum membro neste cargo.*"]
+    return [f"• {member.mention}" for member in members]
+
+
+def build_jud_status_embeds(guild: discord.Guild):
+    header = discord.Embed(
+        title="⚖️ QUADRO DO TRIBUNAL DE JUSTIÇA",
+        description=(
+            "Relação atualizada dos membros que ocupam os cargos jurídicos configurados.\n\n"
+            "🔄 **Atualização automática a cada 1 minuto.**"
+        ),
+        color=discord.Color.dark_magenta(),
+        timestamp=discord.utils.utcnow()
+    )
+    image_url = str(CONFIG.get("set_panel_image_url") or CONFIG.get("ticket_panel_image_url") or "").strip()
+    if image_url:
+        header.set_image(url=image_url)
+    header.set_footer(text="Tribunal de Justiça • Quadro Jurídico")
+
+    embeds = [header]
+    for key, (label, emoji) in JUD_STATUS_ROLES.items():
+        role = _jud_status_role(guild, key)
+        if not role:
+            description = "⚠️ Cargo ainda não configurado."
+            total = 0
+        else:
+            lines = _status_member_lines(role)
+            description = "\n".join(lines)
+            total = len([m for m in role.members if not m.bot])
+
+        # Evita ultrapassar o limite de descrição do Discord em servidores grandes.
+        if len(description) > 4000:
+            description = description[:3950] + "\n…"
+
+        embed = discord.Embed(
+            title=f"{emoji} {label}",
+            description=description,
+            color=discord.Color.blurple()
+        )
+        embed.set_footer(text=f"Total: {total}")
+        embeds.append(embed)
+
+    return embeds
+
+
+async def update_jud_status_message(guild: discord.Guild):
+    channel = _jud_status_channel(guild)
+    if not channel:
+        return False, "Canal do Status Jurídico não configurado."
+
+    embeds = build_jud_status_embeds(guild)
+    message = None
+    message_id = as_int(CONFIG.get("jud_status_message_id"))
+
+    if message_id:
+        try:
+            message = await channel.fetch_message(message_id)
+        except discord.NotFound:
+            message = None
+        except (discord.Forbidden, discord.HTTPException):
+            message = None
+
+    try:
+        if message:
+            await message.edit(content=None, embeds=embeds)
+        else:
+            message = await channel.send(embeds=embeds)
+            CONFIG["jud_status_message_id"] = message.id
+            save_config()
+    except (discord.Forbidden, discord.HTTPException) as error:
+        return False, str(error)
+
+    return True, channel.mention
+
+
+@tasks.loop(minutes=1)
+async def jud_status_updater():
+    try:
+        guild_id = as_int(CONFIG.get("guild_id"))
+        if not guild_id:
+            return
+        guild = bot.get_guild(guild_id)
+        if not guild:
+            return
+        if not _jud_status_channel(guild):
+            return
+        await update_jud_status_message(guild)
+    except Exception as error:
+        print(f"⚠️ Erro ao atualizar o Status Jurídico: {error}")
+
+
+@jud_status_updater.before_loop
+async def before_jud_status_updater():
+    await bot.wait_until_ready()
+
+
+class JudStatusConfigView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+
+    async def _role(self, interaction, key, label):
+        if not await require_config_manager(interaction):
+            return
+        await interaction.response.send_message(
+            f"Selecione o cargo de **{label}** que será exibido no Status Jurídico:",
+            view=ConfigRoleSelectView(f"jud_status_roles.{key}", f"Status Jurídico • {label}"),
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Canal do status", emoji="📌", style=discord.ButtonStyle.primary, row=0)
+    async def status_channel(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message(
+            "Selecione o canal onde ficará o quadro de membros do Tribunal de Justiça:",
+            view=ConfigTextChannelSelectView("jud_status_channel_id", "Canal do Status Jurídico"),
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Desembargador", emoji="🏛️", style=discord.ButtonStyle.secondary, row=1)
+    async def desembargador(self, interaction, button):
+        await self._role(interaction, "desembargador", "Desembargador")
+
+    @discord.ui.button(label="Juiz", emoji="👨‍⚖️", style=discord.ButtonStyle.secondary, row=1)
+    async def juiz(self, interaction, button):
+        await self._role(interaction, "juiz", "Juiz")
+
+    @discord.ui.button(label="Oficial de Justiça", emoji="📜", style=discord.ButtonStyle.secondary, row=1)
+    async def oficial(self, interaction, button):
+        await self._role(interaction, "oficial_justica", "Oficial de Justiça")
+
+    @discord.ui.button(label="Procurador", emoji="💼", style=discord.ButtonStyle.secondary, row=2)
+    async def procurador(self, interaction, button):
+        await self._role(interaction, "procurador", "Procurador")
+
+    @discord.ui.button(label="Promotor", emoji="⚖️", style=discord.ButtonStyle.secondary, row=2)
+    async def promotor(self, interaction, button):
+        await self._role(interaction, "promotor", "Promotor")
+
+    @discord.ui.button(label="Advogado", emoji="📚", style=discord.ButtonStyle.secondary, row=2)
+    async def advogado(self, interaction, button):
+        await self._role(interaction, "advogado", "Advogado")
+
+    @discord.ui.button(label="Publicar / Atualizar", emoji="🔄", style=discord.ButtonStyle.success, row=3)
+    async def publish_status(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ Use dentro do servidor.", ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        ok, detail = await update_jud_status_message(interaction.guild)
+        if ok:
+            await interaction.followup.send(
+                f"✅ Status Jurídico publicado/atualizado em {detail}. Ele será atualizado automaticamente a cada 1 minuto.",
+                ephemeral=True
+            )
+        else:
+            await interaction.followup.send(f"❌ Não foi possível atualizar: `{detail}`", ephemeral=True)
+
+
 class ConfigMainView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=600)
@@ -2053,6 +2271,15 @@ class ConfigMainView(discord.ui.View):
     async def jud_notice_config(self, interaction, button):
         if not await require_config_manager(interaction): return
         await interaction.response.send_message("⚙️ **Configuração do painel de Avisos JUD**", view=JudNoticeConfigView(), ephemeral=True)
+
+    @discord.ui.button(label="Status Jurídico", emoji="⚖️", style=discord.ButtonStyle.secondary, row=3)
+    async def jud_status_config(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message(
+            "⚙️ **Configuração do Status Jurídico**\nEscolha o canal e os cargos que serão exibidos no quadro.",
+            view=JudStatusConfigView(),
+            ephemeral=True
+        )
 
     @discord.ui.button(label="Ver configuração", emoji="🔎", style=discord.ButtonStyle.secondary, row=0)
     async def summary(self, interaction, button):
@@ -2377,6 +2604,8 @@ async def on_ready():
     print(f"Conectado como {bot.user} ({bot.user.id})")
     if not absence_expiry_watcher.is_running():
         absence_expiry_watcher.start()
+    if not jud_status_updater.is_running():
+        jud_status_updater.start()
 
 
 token = os.getenv("DISCORD_TOKEN")
