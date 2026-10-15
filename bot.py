@@ -882,6 +882,9 @@ def build_absence_panel_embed(guild: discord.Guild | None = None):
         ),
         color=discord.Color.dark_red()
     )
+    image_url = str(CONFIG.get("set_panel_image_url") or CONFIG.get("ticket_panel_image_url") or "").strip()
+    if image_url:
+        embed.set_image(url=image_url)
     embed.set_footer(text="Tribunal de Justiça • Controle de Ausências")
     return embed
 
@@ -1280,6 +1283,9 @@ def build_jud_notice_panel_embed(guild: discord.Guild | None = None):
         ),
         color=discord.Color.dark_red()
     )
+    image_url = str(CONFIG.get("set_panel_image_url") or CONFIG.get("ticket_panel_image_url") or "").strip()
+    if image_url:
+        embed.set_image(url=image_url)
     embed.set_footer(text="Tribunal de Justiça • Sistema Integrado")
     return embed
 
