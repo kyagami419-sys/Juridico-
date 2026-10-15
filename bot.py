@@ -45,6 +45,8 @@ DEFAULT_CONFIG = {
     "voice_log_channel_id": 0,
     "nickname_log_channel_id": 0,
     "message_log_channel_id": 0,
+    "jud_notice_channel_id": 0,
+    "jud_notice_role_id": 0,
     "absences": [],
     "set_panel_image_url": "",
     "ticket_panel_image_url": "",
@@ -322,6 +324,7 @@ class JuridicoBot(commands.Bot):
         self.add_view(TicketPanelView())
         self.add_view(TicketActionsView())
         self.add_view(AbsencePanelView())
+        self.add_view(JudNoticePanelView())
 
         guild_id = as_int(CONFIG.get("guild_id"))
         if guild_id:
@@ -1220,6 +1223,214 @@ async def embe(interaction: discord.Interaction, canal: discord.TextChannel):
     await interaction.response.send_modal(SendEmbedModal(canal))
 
 
+
+# =========================
+# SISTEMA DE AVISOS JUD
+# =========================
+
+def _jud_notice_role(guild: discord.Guild):
+    role_id = as_int(CONFIG.get("jud_notice_role_id"))
+    return guild.get_role(role_id) if role_id else None
+
+
+def _jud_notice_channel(guild: discord.Guild):
+    channel_id = as_int(CONFIG.get("jud_notice_channel_id"))
+    channel = guild.get_channel(channel_id) if channel_id else None
+    return channel if isinstance(channel, discord.TextChannel) else None
+
+
+async def require_jud_notice_role(interaction: discord.Interaction) -> bool:
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("❌ Use este painel dentro do servidor.", ephemeral=True)
+        return False
+
+    role = _jud_notice_role(interaction.guild)
+    if not role:
+        await interaction.response.send_message("❌ O cargo autorizado para Avisos JUD ainda não foi configurado.", ephemeral=True)
+        return False
+
+    if role not in interaction.user.roles:
+        await interaction.response.send_message(
+            f"❌ Apenas membros com o cargo {role.mention} podem utilizar este painel.",
+            ephemeral=True
+        )
+        return False
+
+    channel = _jud_notice_channel(interaction.guild)
+    if channel and interaction.channel_id != channel.id:
+        await interaction.response.send_message(
+            f"❌ Este painel deve ser utilizado em {channel.mention}.",
+            ephemeral=True
+        )
+        return False
+
+    return True
+
+
+def build_jud_notice_panel_embed(guild: discord.Guild | None = None):
+    role = _jud_notice_role(guild) if guild else None
+    role_text = role.mention if role else "cargo autorizado"
+    embed = discord.Embed(
+        title="⚖️ AVISOS JUD • TRIBUNAL DE JUSTIÇA",
+        description=(
+            "Painel oficial para envio de comunicados no privado dos membros.\n\n"
+            f"Acesso autorizado: {role_text}\n\n"
+            "Escolha abaixo se o aviso será enviado para **uma pessoa específica** "
+            "ou para **todos os membros do servidor**."
+        ),
+        color=discord.Color.dark_red()
+    )
+    embed.set_footer(text="Tribunal de Justiça • Sistema Integrado")
+    return embed
+
+
+def build_jud_dm_embed(title: str, message: str, sender: discord.Member):
+    embed = discord.Embed(
+        title=title.strip() or "⚖️ Aviso do Tribunal de Justiça",
+        description=message.strip(),
+        color=discord.Color.dark_red(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="Enviado por", value=sender.display_name, inline=False)
+    embed.set_footer(text="Tribunal de Justiça • Aviso Oficial")
+    return embed
+
+
+class JudNoticeMessageModal(discord.ui.Modal):
+    def __init__(self, target_user_id: int | None = None, send_all: bool = False):
+        title = "Aviso para todos" if send_all else "Aviso individual"
+        super().__init__(title=title)
+        self.target_user_id = target_user_id
+        self.send_all = send_all
+
+        self.titulo = discord.ui.TextInput(
+            label="Título do aviso",
+            placeholder="Ex.: Comunicado do Tribunal de Justiça",
+            required=False,
+            max_length=256
+        )
+        self.mensagem = discord.ui.TextInput(
+            label="Mensagem",
+            placeholder="Escreva aqui o aviso que será enviado no privado...",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=4000
+        )
+        self.add_item(self.titulo)
+        self.add_item(self.mensagem)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not await require_jud_notice_role(interaction):
+            return
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            return
+
+        title = str(self.titulo).strip()
+        message = str(self.mensagem).strip()
+        if not message:
+            return await interaction.response.send_message("❌ Escreva uma mensagem para enviar.", ephemeral=True)
+
+        embed = build_jud_dm_embed(title, message, interaction.user)
+
+        if not self.send_all:
+            member = interaction.guild.get_member(as_int(self.target_user_id))
+            if not member or member.bot:
+                return await interaction.response.send_message("❌ Usuário não encontrado ou inválido.", ephemeral=True)
+
+            sent = await safe_dm(member, embed=embed)
+            if sent:
+                return await interaction.response.send_message(
+                    f"✅ Aviso enviado no privado de {member.mention}.",
+                    ephemeral=True
+                )
+            return await interaction.response.send_message(
+                f"⚠️ Não foi possível enviar o aviso para {member.mention}. O privado pode estar fechado.",
+                ephemeral=True
+            )
+
+        # O envio para todos pode levar alguns segundos/minutos dependendo do tamanho do servidor.
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        sent_count = 0
+        failed_count = 0
+        total_targets = 0
+
+        for member in interaction.guild.members:
+            if member.bot:
+                continue
+            total_targets += 1
+            try:
+                await member.send(embed=embed)
+                sent_count += 1
+            except (discord.Forbidden, discord.HTTPException):
+                failed_count += 1
+
+            # Pequena pausa para reduzir rajadas de requisições ao Discord.
+            await asyncio.sleep(0.20)
+
+        await interaction.followup.send(
+            "✅ **Envio geral concluído.**\n"
+            f"📨 Enviados: **{sent_count}**\n"
+            f"⚠️ Não entregues: **{failed_count}**\n"
+            f"👥 Total processado: **{total_targets}**",
+            ephemeral=True
+        )
+
+
+class JudNoticeUserSelect(discord.ui.UserSelect):
+    def __init__(self):
+        super().__init__(
+            placeholder="Selecione a pessoa que receberá o aviso",
+            min_values=1,
+            max_values=1
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await require_jud_notice_role(interaction):
+            return
+        selected = self.values[0]
+        if getattr(selected, "bot", False):
+            return await interaction.response.send_message("❌ Selecione um membro, não um bot.", ephemeral=True)
+        await interaction.response.send_modal(JudNoticeMessageModal(target_user_id=selected.id, send_all=False))
+
+
+class JudNoticeUserSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        self.add_item(JudNoticeUserSelect())
+
+
+class JudNoticePanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Enviar para uma pessoa",
+        emoji="👤",
+        style=discord.ButtonStyle.primary,
+        custom_id="jud_notice:single"
+    )
+    async def send_single(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await require_jud_notice_role(interaction):
+            return
+        await interaction.response.send_message(
+            "Selecione a pessoa que receberá o aviso:",
+            view=JudNoticeUserSelectView(),
+            ephemeral=True
+        )
+
+    @discord.ui.button(
+        label="Enviar para todos",
+        emoji="📢",
+        style=discord.ButtonStyle.danger,
+        custom_id="jud_notice:all"
+    )
+    async def send_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await require_jud_notice_role(interaction):
+            return
+        await interaction.response.send_modal(JudNoticeMessageModal(send_all=True))
+
+
 @bot.tree.command(name="painel_set", description="Envia o painel de solicitação de SET neste canal.")
 @app_commands.checks.has_permissions(administrator=True)
 async def painel_set(interaction: discord.Interaction):
@@ -1496,6 +1707,14 @@ def config_summary_embed(guild: discord.Guild):
         inline=False
     )
     embed.add_field(
+        name="📢 AVISOS JUD",
+        value=(
+            f"Canal do painel: {channel_text('jud_notice_channel_id')}\n"
+            f"Cargo autorizado: {role_text('jud_notice_role_id')}"
+        ),
+        inline=False
+    )
+    embed.add_field(
         name="🖼️ Imagens",
         value=(
             f"Painel SET: {'✅ Configurada' if CONFIG.get('set_panel_image_url') else 'Não configurada'}\n"
@@ -1740,6 +1959,56 @@ class ServerLogsConfigView(discord.ui.View):
         )
 
 
+
+class JudNoticeConfigView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+
+    @discord.ui.button(label="Canal Avisos JUD", emoji="📢", style=discord.ButtonStyle.primary, row=0)
+    async def notice_channel(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message(
+            "Selecione o canal onde ficará o painel de Avisos JUD:",
+            view=ConfigTextChannelSelectView("jud_notice_channel_id", "Canal de Avisos JUD"),
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Cargo autorizado", emoji="🛡️", style=discord.ButtonStyle.secondary, row=0)
+    async def notice_role(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message(
+            "Selecione o cargo que poderá utilizar o painel e enviar avisos privados:",
+            view=ConfigRoleSelectView("jud_notice_role_id", "Cargo autorizado para Avisos JUD"),
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Publicar painel", emoji="📌", style=discord.ButtonStyle.success, row=1)
+    async def publish_panel(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ Use dentro do servidor.", ephemeral=True)
+
+        channel = _jud_notice_channel(interaction.guild)
+        role = _jud_notice_role(interaction.guild)
+        if not channel:
+            return await interaction.response.send_message("❌ Configure primeiro o canal de Avisos JUD.", ephemeral=True)
+        if not role:
+            return await interaction.response.send_message("❌ Configure primeiro o cargo autorizado.", ephemeral=True)
+
+        try:
+            await channel.send(embed=build_jud_notice_panel_embed(interaction.guild), view=JudNoticePanelView())
+        except (discord.Forbidden, discord.HTTPException) as error:
+            return await interaction.response.send_message(
+                f"❌ Não foi possível publicar o painel: `{error}`",
+                ephemeral=True
+            )
+
+        await interaction.response.send_message(
+            f"✅ Painel de Avisos JUD publicado em {channel.mention}.",
+            ephemeral=True
+        )
+
+
 class ConfigMainView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=600)
@@ -1773,6 +2042,11 @@ class ConfigMainView(discord.ui.View):
     async def logs_config(self, interaction, button):
         if not await require_config_manager(interaction): return
         await interaction.response.send_message("⚙️ **Configuração dos logs do servidor**", view=ServerLogsConfigView(), ephemeral=True)
+
+    @discord.ui.button(label="Avisos JUD", emoji="📢", style=discord.ButtonStyle.secondary, row=3)
+    async def jud_notice_config(self, interaction, button):
+        if not await require_config_manager(interaction): return
+        await interaction.response.send_message("⚙️ **Configuração do painel de Avisos JUD**", view=JudNoticeConfigView(), ephemeral=True)
 
     @discord.ui.button(label="Ver configuração", emoji="🔎", style=discord.ButtonStyle.secondary, row=0)
     async def summary(self, interaction, button):
